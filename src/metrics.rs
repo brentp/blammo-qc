@@ -83,7 +83,8 @@ impl ReadLengthAccumulator {
         let mut histogram = BTreeMap::new();
         for (len, count) in self.bins.iter().enumerate() {
             if *count > 0 {
-                histogram.insert(len as u32, *count);
+                let binned_length = read_length_histogram_bin(len as u32);
+                *histogram.entry(binned_length).or_insert(0) += *count;
             }
         }
 
@@ -105,6 +106,14 @@ impl ReadLengthAccumulator {
             histogram,
         }
     }
+}
+
+fn read_length_histogram_bin(read_len: u32) -> u32 {
+    if read_len <= 1_000 {
+        return read_len;
+    }
+    let over = read_len - 1_000;
+    1_000 + ((over / 50) * 50)
 }
 
 #[derive(Debug)]
@@ -415,6 +424,7 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
     let mut md_mismatch_offsets_buf: Vec<u32> = Vec::new();
     let mut seen_contigs = vec![false; target_names_for_logging.len()];
     let mut contig_logs_emitted = 0_usize;
+    let contig_log_limit = 24_usize;
 
     for record_result in reader.records() {
         let record = record_result.with_context(|| {
@@ -423,9 +433,8 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
                 input.path.to_string_lossy()
             )
         })?;
-        counts.total_records_seen += 1;
 
-        if contig_logs_emitted < 5 {
+        if contig_logs_emitted < contig_log_limit {
             let tid = record.tid();
             if tid >= 0 {
                 let tid = tid as usize;
@@ -434,15 +443,18 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
                     contig_logs_emitted += 1;
                     if let Some(contig_name) = target_names_for_logging.get(tid) {
                         log::info!(
-                            "Reached chromosome {} ({}/5); total reads processed: {}",
+                            "Sample {} reached chromosome {} ({}/{}); total reads processed so far: {}",
+                            sample_id,
                             contig_name,
                             contig_logs_emitted,
+                            contig_log_limit,
                             counts.total_records_seen
                         );
                     }
                 }
             }
         }
+        counts.total_records_seen += 1;
 
         let classification = classify_record(&record);
         if classification.is_unmapped {
@@ -866,7 +878,8 @@ mod tests {
     use rust_htslib::bam::{Header, HeaderView, header::HeaderRecord};
 
     use super::{
-        DepthCollector, Interval, classify_record, parse_md_mismatch_offsets, sample_id_from_header,
+        DepthCollector, Interval, classify_record, parse_md_mismatch_offsets,
+        read_length_histogram_bin, sample_id_from_header,
     };
     use crate::cli::DepthScope;
 
@@ -972,6 +985,16 @@ mod tests {
         let filtered = classify_record(&record);
         assert!(filtered.duplicate_excluded);
         assert!(!filtered.include_in_read_metrics);
+    }
+
+    #[test]
+    fn read_length_histogram_uses_wider_bins_above_1000() {
+        assert_eq!(read_length_histogram_bin(1000), 1000);
+        assert_eq!(read_length_histogram_bin(1010), 1000);
+        assert_eq!(read_length_histogram_bin(1045), 1000);
+        assert_eq!(read_length_histogram_bin(1050), 1050);
+        assert_eq!(read_length_histogram_bin(1099), 1050);
+        assert_eq!(read_length_histogram_bin(1100), 1100);
     }
 
     #[test]

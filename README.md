@@ -1,7 +1,7 @@
 # blammo-qc
 
 `blammo-qc` is a Rust CLI for BAM/CRAM QC that writes:
-- a JSON metrics report
+- an optional JSON metrics report (only when `--output-json` is provided)
 - a self-contained interactive Plotly HTML report
 
 ## Example usage
@@ -13,4 +13,3 @@ cargo run -- \
   --plot-max-contigs 30 \
   sample1.bam sample2.cram --reference ref.fa
 ```
-

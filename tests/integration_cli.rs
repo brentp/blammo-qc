@@ -134,3 +134,45 @@ fn cli_generates_expected_json_and_html_for_fixture_bam() {
     assert!(html.contains("Blammo QC Report"));
     assert!(html.contains("plotly"));
 }
+
+#[test]
+fn cli_skips_json_output_when_flag_not_provided() {
+    let tmp = tempdir().expect("create temp dir");
+    let bam_path = tmp.path().join("fixture.bam");
+    let html_path = tmp.path().join("report.html");
+    let implicit_json_path = tmp.path().join("qc.json");
+    write_fixture_bam(&bam_path);
+
+    let bin = resolve_binary_path();
+    assert!(
+        bin.exists(),
+        "binary path does not exist: {}",
+        bin.display()
+    );
+
+    let output = Command::new(&bin)
+        .current_dir(tmp.path())
+        .args([
+            "--output-html",
+            "report.html",
+            "--threads",
+            "1",
+            &bam_path.to_string_lossy(),
+        ])
+        .output()
+        .expect("run blammo-qc");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(html_path.exists(), "expected HTML report to be written");
+    assert!(
+        !implicit_json_path.exists(),
+        "did not expect default JSON output at {}",
+        implicit_json_path.display()
+    );
+}

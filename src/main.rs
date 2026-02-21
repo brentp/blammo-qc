@@ -76,7 +76,9 @@ fn run() -> Result<()> {
         samples,
     };
 
-    write_json_report(&report, &config.output_json)?;
+    if let Some(output_json) = &config.output_json {
+        write_json_report(&report, output_json)?;
+    }
     write_html_report(&report, &config.output_html, config.plot_max_contigs)?;
     Ok(())
 }

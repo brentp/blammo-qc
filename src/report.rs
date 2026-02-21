@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
-    io::BufWriter,
+    io::{BufWriter, Write},
     path::Path,
 };
 
@@ -13,8 +13,8 @@ use plotly::{
         DisplayModeBar, DoubleClick, ImageButtonFormats, ModeBarButtonName, ToImageButtonOptions,
     },
     layout::{
-        Axis, BarMode, DragMode, HoverMode, Legend, Margin, ModeBar, SpikeMode,
-        update_menu::{Button, ButtonMethod, UpdateMenu, UpdateMenuDirection, UpdateMenuType},
+        Axis, AxisType, BarMode, DragMode, HoverMode, Legend, Margin, ModeBar, SpikeMode,
+        update_menu::{Button, ButtonMethod, UpdateMenu, UpdateMenuType},
     },
 };
 use serde_json::json;
@@ -32,90 +32,33 @@ pub fn write_json_report(report: &QcReport, path: &Path) -> Result<()> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TraceView {
+enum MetricTraceView {
+    MappedReads,
     SoftClips,
     Unmapped,
     MismatchByBaseQuality,
     ReadLength,
-    Depth { chromosome: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ViewSelection {
+enum MetricSelection {
+    MappedReads,
     SoftClips,
     Unmapped,
     MismatchByBaseQuality,
     ReadLength,
-    Depth { chromosome: String },
 }
 
 pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize) -> Result<()> {
-    let mut plot = Plot::new();
-    let mut trace_views: Vec<TraceView> = Vec::new();
     let sample_ids: Vec<String> = report
         .samples
         .iter()
         .map(|sample| sample.sample_id.clone())
         .collect();
 
-    let soft_clip_values: Vec<u64> = report
-        .samples
-        .iter()
-        .map(|sample| sample.soft_clips.total_soft_clipped_bases)
-        .collect();
-    plot.add_trace(
-        Bar::new(sample_ids.clone(), soft_clip_values)
-            .name("Soft-clipped bases")
-            .hover_template("Sample: %{x}<br>Soft-clipped bases: %{y}<extra></extra>")
-            .visible(Visible::True),
-    );
-    trace_views.push(TraceView::SoftClips);
-
-    let unmapped_values: Vec<u64> = report
-        .samples
-        .iter()
-        .map(|sample| sample.counts.unmapped_reads)
-        .collect();
-    plot.add_trace(
-        Bar::new(sample_ids.clone(), unmapped_values)
-            .name("Unmapped reads")
-            .hover_template("Sample: %{x}<br>Unmapped reads: %{y}<extra></extra>")
-            .visible(Visible::False),
-    );
-    trace_views.push(TraceView::Unmapped);
-
-    for sample in &report.samples {
-        let y: Vec<u64> = BQ_BIN_LABELS
-            .iter()
-            .map(|label| sample_count(sample, label))
-            .collect();
-        let x: Vec<&str> = BQ_BIN_LABELS.to_vec();
-        plot.add_trace(
-            Scatter::new(x, y)
-                .mode(Mode::LinesMarkers)
-                .line(Line::new().width(2.0))
-                .marker(Marker::new().size(7))
-                .hover_template("BQ bin: %{x}<br>Mismatches: %{y}<extra></extra>")
-                .name(format!("{} mismatch BQ", sample.sample_id))
-                .visible(Visible::False),
-        );
-        trace_views.push(TraceView::MismatchByBaseQuality);
-    }
-
-    for sample in &report.samples {
-        let (x, y) = histogram_points(&sample.read_length.histogram);
-        plot.add_trace(
-            Scatter::new(x, y)
-                .mode(Mode::Lines)
-                .line(Line::new().width(2.0))
-                .hover_template("Read length: %{x}<br>Reads: %{y}<extra></extra>")
-                .name(format!("{} read length", sample.sample_id))
-                .visible(Visible::False),
-        );
-        trace_views.push(TraceView::ReadLength);
-    }
-
-    let (selected_contigs, omitted_contig_count) = select_depth_contigs(report, plot_max_contigs);
+    let (mut selected_contigs, omitted_contig_count) =
+        select_depth_contigs(report, plot_max_contigs);
+    sort_depth_chromosomes(&mut selected_contigs);
     let selected_contig_set: BTreeSet<String> = selected_contigs.iter().cloned().collect();
     let other_histograms: Vec<Vec<u64>> = if omitted_contig_count > 0 {
         report
@@ -133,7 +76,12 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
         depth_views.push("__other__".to_string());
     }
 
+    let mut depth_plot = Plot::new();
+    let mut depth_trace_chromosomes: Vec<String> = Vec::new();
+    let mut depth_x_max_by_chromosome: BTreeMap<String, u32> = BTreeMap::new();
+
     for chromosome in &depth_views {
+        let mut combined_histogram = vec![0_u64; DEPTH_HIST_BINS];
         for (sample_index, sample) in report.samples.iter().enumerate() {
             let histogram = if chromosome == "__genome__" {
                 sample.depth_distribution.genome_wide_histogram.as_slice()
@@ -150,6 +98,9 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
                     .map(Vec::as_slice)
                     .unwrap_or(&[])
             };
+            for (depth_bin, count) in histogram.iter().enumerate().take(DEPTH_HIST_BINS) {
+                combined_histogram[depth_bin] += *count;
+            }
             let (x, y) = depth_points(histogram);
             let label = if chromosome == "__genome__" {
                 format!("{} depth (genome)", sample.sample_id)
@@ -158,101 +109,81 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             } else {
                 format!("{} depth ({chromosome})", sample.sample_id)
             };
-            plot.add_trace(
+            depth_plot.add_trace(
                 Scatter::new(x, y)
                     .mode(Mode::Lines)
                     .line(Line::new().width(2.0))
                     .hover_template("Depth: %{x}<br>Bases: %{y}<extra></extra>")
                     .name(label)
-                    .visible(Visible::False),
+                    .visible(if chromosome == "__genome__" {
+                        Visible::True
+                    } else {
+                        Visible::False
+                    }),
             );
-            trace_views.push(TraceView::Depth {
-                chromosome: chromosome.clone(),
-            });
+            depth_trace_chromosomes.push(chromosome.clone());
         }
+        depth_x_max_by_chromosome.insert(
+            chromosome.clone(),
+            depth_x_max_from_histogram(&combined_histogram),
+        );
     }
 
-    let mut view_options = vec![
-        (
-            "Soft clips".to_string(),
-            ViewSelection::SoftClips,
-            "Soft-clipped bases by sample".to_string(),
-            "Sample".to_string(),
-            "Soft-clipped bases".to_string(),
-        ),
-        (
-            "Unmapped reads".to_string(),
-            ViewSelection::Unmapped,
-            "Unmapped reads by sample".to_string(),
-            "Sample".to_string(),
-            "Reads".to_string(),
-        ),
-        (
-            "Mismatches by base quality".to_string(),
-            ViewSelection::MismatchByBaseQuality,
-            "Mismatch counts partitioned by base quality".to_string(),
-            "Base-quality bin".to_string(),
-            "Mismatches".to_string(),
-        ),
-        (
-            "Read length distribution".to_string(),
-            ViewSelection::ReadLength,
-            "Read-length distribution".to_string(),
-            "Read length".to_string(),
-            "Reads".to_string(),
-        ),
-    ];
-
-    view_options.push((
-        "Depth distribution (genome)".to_string(),
-        ViewSelection::Depth {
-            chromosome: "__genome__".to_string(),
-        },
+    let mut depth_options = vec![(
+        "Genome-wide".to_string(),
+        "__genome__".to_string(),
         format!(
             "Depth distribution (genome-wide, {})",
             depth_scope_summary(report)
         ),
-        "Depth".to_string(),
-        depth_y_axis_label(report),
-    ));
+        depth_x_max_by_chromosome
+            .get("__genome__")
+            .copied()
+            .unwrap_or(1),
+    )];
     for chromosome in depth_views
         .iter()
         .filter(|v| v.as_str() != "__genome__" && v.as_str() != "__other__")
     {
-        view_options.push((
-            format!("Depth distribution ({chromosome})"),
-            ViewSelection::Depth {
-                chromosome: chromosome.clone(),
-            },
+        depth_options.push((
+            chromosome.clone(),
+            chromosome.clone(),
             format!(
                 "Depth distribution ({chromosome}, {})",
                 depth_scope_summary(report)
             ),
-            "Depth".to_string(),
-            depth_y_axis_label(report),
+            depth_x_max_by_chromosome
+                .get(chromosome)
+                .copied()
+                .unwrap_or(1),
         ));
     }
     if omitted_contig_count > 0 {
-        view_options.push((
-            format!("Depth distribution (Other {omitted_contig_count} contigs)"),
-            ViewSelection::Depth {
-                chromosome: "__other__".to_string(),
-            },
+        depth_options.push((
+            format!("Other ({omitted_contig_count} contigs)"),
+            "__other__".to_string(),
             format!(
                 "Depth distribution (other contigs, {}, n={omitted_contig_count})",
                 depth_scope_summary(report)
             ),
-            "Depth".to_string(),
-            depth_y_axis_label(report),
+            depth_x_max_by_chromosome
+                .get("__other__")
+                .copied()
+                .unwrap_or(1),
         ));
     }
 
-    let metric_buttons: Vec<Button> = view_options
+    let depth_default_x_max = depth_x_max_by_chromosome
+        .get("__genome__")
+        .copied()
+        .unwrap_or(1);
+    let depth_y_axis = depth_y_axis_label(report);
+    let depth_buttons: Vec<Button> = depth_options
         .iter()
-        .map(|(label, selection, title, x_label, y_label)| {
-            let visible: Vec<bool> = trace_views
+        .map(|(label, selected_chromosome, title, x_max)| {
+            let visible: Vec<bool> = depth_trace_chromosomes
                 .iter()
-                .map(|trace_view| trace_is_visible(trace_view, selection))
+                .map(|trace_chromosome| trace_chromosome == selected_chromosome)
                 .collect();
             Button::new()
                 .label(label.clone())
@@ -261,27 +192,23 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
                     { "visible": visible },
                     {
                         "title": { "text": title },
-                        "xaxis": { "title": { "text": x_label } },
-                        "yaxis": { "title": { "text": y_label } }
+                        "xaxis": {
+                            "title": { "text": "Depth" },
+                            "type": "linear",
+                            "autorange": false,
+                            "range": [0, x_max],
+                            "fixedrange": false
+                        },
+                        "yaxis": { "title": { "text": depth_y_axis }, "fixedrange": false },
+                        "dragmode": "zoom"
                     }
                 ]))
         })
         .collect();
 
-    let y_scale_buttons = vec![
-        Button::new()
-            .label("Y: Linear")
-            .method(ButtonMethod::Relayout)
-            .args(json!([{ "yaxis.type": "linear" }])),
-        Button::new()
-            .label("Y: Log")
-            .method(ButtonMethod::Relayout)
-            .args(json!([{ "yaxis.type": "log" }])),
-    ];
-
-    let metric_menu = UpdateMenu::new()
+    let depth_menu = UpdateMenu::new()
         .ty(UpdateMenuType::Dropdown)
-        .buttons(metric_buttons)
+        .buttons(depth_buttons)
         .background_color("#FFFFFF")
         .border_color("#CBD5E1")
         .border_width(1)
@@ -289,28 +216,290 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
         .active(0)
         .x(0.01)
         .y(1.22);
-    let y_scale_menu = UpdateMenu::new()
-        .ty(UpdateMenuType::Buttons)
-        .direction(UpdateMenuDirection::Right)
-        .buttons(y_scale_buttons)
+
+    let depth_layout = Layout::new()
+        .title(
+            Title::with_text(format!(
+                "Depth distribution (genome-wide, {})",
+                depth_scope_summary(report)
+            ))
+            .font(
+                Font::new()
+                    .family("IBM Plex Sans, Arial, sans-serif")
+                    .size(22)
+                    .color("#0F172A"),
+            ),
+        )
+        .height(680)
+        .drag_mode(DragMode::Zoom)
+        .font(
+            Font::new()
+                .family("IBM Plex Sans, Arial, sans-serif")
+                .size(13)
+                .color("#0F172A"),
+        )
+        .paper_background_color("#F8FAFC")
+        .plot_background_color("#FFFFFF")
+        .colorway(vec![
+            "#0EA5E9", "#F97316", "#22C55E", "#A855F7", "#EF4444", "#14B8A6", "#F59E0B", "#3B82F6",
+        ])
+        .hover_mode(HoverMode::XUnified)
+        .margin(Margin::new().top(130).right(30).bottom(70).left(70))
+        .legend(
+            Legend::new()
+                .orientation(Orientation::Vertical)
+                .x(0.01)
+                .x_anchor(Anchor::Left)
+                .y(0.99)
+                .y_anchor(Anchor::Top),
+        )
+        .mode_bar(
+            ModeBar::new()
+                .background_color("#FFFFFF")
+                .color("#334155")
+                .active_color("#0EA5E9"),
+        )
+        .x_axis(
+            Axis::new()
+                .title("Depth")
+                .type_(AxisType::Linear)
+                .auto_range(false)
+                .range(vec![0.0, depth_default_x_max as f64])
+                .auto_margin(true)
+                .line_color("#CBD5E1")
+                .grid_color("#E2E8F0")
+                .show_spikes(true)
+                .spike_mode(SpikeMode::Across)
+                .spike_color("#94A3B8")
+                .spike_dash(DashType::Dot)
+                .zero_line(false),
+        )
+        .y_axis(
+            Axis::new()
+                .title(depth_y_axis.clone())
+                .auto_margin(true)
+                .line_color("#CBD5E1")
+                .grid_color("#E2E8F0")
+                .show_spikes(true)
+                .spike_mode(SpikeMode::Across)
+                .spike_color("#94A3B8")
+                .spike_dash(DashType::Dot)
+                .zero_line(false),
+        )
+        .update_menus(vec![depth_menu]);
+    depth_plot.set_layout(depth_layout);
+    depth_plot.set_configuration(
+        Configuration::new()
+            .responsive(true)
+            .scroll_zoom(true)
+            .display_logo(false)
+            .display_mode_bar(DisplayModeBar::True)
+            .double_click(DoubleClick::ResetAutoSize)
+            .mode_bar_buttons_to_remove(vec![ModeBarButtonName::SendDataToCloud])
+            .to_image_button_options(
+                ToImageButtonOptions::new()
+                    .format(ImageButtonFormats::Png)
+                    .filename("blammo-depth-distribution")
+                    .height(900)
+                    .width(1500)
+                    .scale(2),
+            ),
+    );
+
+    let mut metrics_plot = Plot::new();
+    let mut metric_trace_views: Vec<MetricTraceView> = Vec::new();
+
+    let mapped_values: Vec<u64> = report
+        .samples
+        .iter()
+        .map(|sample| sample.counts.primary_mapped_reads_used)
+        .collect();
+    metrics_plot.add_trace(
+        Bar::new(sample_ids.clone(), mapped_values)
+            .name("Mapped reads")
+            .hover_template("Sample: %{x}<br>Mapped reads: %{y}<extra></extra>")
+            .visible(Visible::False),
+    );
+    metric_trace_views.push(MetricTraceView::MappedReads);
+
+    let soft_clip_values: Vec<u64> = report
+        .samples
+        .iter()
+        .map(|sample| sample.soft_clips.total_soft_clipped_bases)
+        .collect();
+    metrics_plot.add_trace(
+        Bar::new(sample_ids.clone(), soft_clip_values)
+            .name("Soft-clipped bases")
+            .hover_template("Sample: %{x}<br>Soft-clipped bases: %{y}<extra></extra>")
+            .visible(Visible::False),
+    );
+    metric_trace_views.push(MetricTraceView::SoftClips);
+
+    let unmapped_values: Vec<u64> = report
+        .samples
+        .iter()
+        .map(|sample| sample.counts.unmapped_reads)
+        .collect();
+    metrics_plot.add_trace(
+        Bar::new(sample_ids.clone(), unmapped_values)
+            .name("Unmapped reads")
+            .hover_template("Sample: %{x}<br>Unmapped reads: %{y}<extra></extra>")
+            .visible(Visible::False),
+    );
+    metric_trace_views.push(MetricTraceView::Unmapped);
+
+    for sample in &report.samples {
+        let y: Vec<u64> = BQ_BIN_LABELS
+            .iter()
+            .map(|label| sample_count(sample, label))
+            .collect();
+        let x: Vec<&str> = BQ_BIN_LABELS.to_vec();
+        metrics_plot.add_trace(
+            Scatter::new(x, y)
+                .mode(Mode::LinesMarkers)
+                .line(Line::new().width(2.0))
+                .marker(Marker::new().size(7))
+                .hover_template("BQ bin: %{x}<br>Mismatches: %{y}<extra></extra>")
+                .name(format!("{} mismatch BQ", sample.sample_id))
+                .visible(Visible::False),
+        );
+        metric_trace_views.push(MetricTraceView::MismatchByBaseQuality);
+    }
+
+    for sample in &report.samples {
+        let (x, y) = histogram_points(&sample.read_length.histogram);
+        metrics_plot.add_trace(
+            Scatter::new(x, y)
+                .mode(Mode::Lines)
+                .line(Line::new().width(2.0))
+                .hover_template("Read length: %{x}<br>Reads: %{y}<extra></extra>")
+                .name(format!("{} read length", sample.sample_id))
+                .visible(Visible::True),
+        );
+        metric_trace_views.push(MetricTraceView::ReadLength);
+    }
+
+    let metric_options = vec![
+        (
+            "Mapped reads".to_string(),
+            MetricSelection::MappedReads,
+            "Mapped reads by sample".to_string(),
+            "Sample".to_string(),
+            "Mapped reads".to_string(),
+            "category".to_string(),
+            json!(sample_ids.clone()),
+            true,
+        ),
+        (
+            "Soft clips".to_string(),
+            MetricSelection::SoftClips,
+            "Soft-clipped bases by sample".to_string(),
+            "Sample".to_string(),
+            "Soft-clipped bases".to_string(),
+            "category".to_string(),
+            json!(sample_ids.clone()),
+            true,
+        ),
+        (
+            "Unmapped reads".to_string(),
+            MetricSelection::Unmapped,
+            "Unmapped reads by sample".to_string(),
+            "Sample".to_string(),
+            "Reads".to_string(),
+            "category".to_string(),
+            json!(sample_ids.clone()),
+            true,
+        ),
+        (
+            "Mismatches by base quality".to_string(),
+            MetricSelection::MismatchByBaseQuality,
+            "Mismatch counts partitioned by base quality".to_string(),
+            "Base-quality bin".to_string(),
+            "Mismatches".to_string(),
+            "category".to_string(),
+            json!(BQ_BIN_LABELS),
+            false,
+        ),
+        (
+            "Read length distribution".to_string(),
+            MetricSelection::ReadLength,
+            "Read-length distribution".to_string(),
+            "Read length".to_string(),
+            "Reads".to_string(),
+            "linear".to_string(),
+            json!(null),
+            false,
+        ),
+    ];
+
+    let metric_buttons: Vec<Button> = metric_options
+        .iter()
+        .map(
+            |(
+                label,
+                selection,
+                title,
+                x_label,
+                y_label,
+                x_axis_type,
+                category_array,
+                lock_axes,
+            )| {
+                let visible: Vec<bool> = metric_trace_views
+                    .iter()
+                    .map(|trace_view| metric_trace_is_visible(trace_view, selection))
+                    .collect();
+                let category_order = if category_array.is_null() {
+                    serde_json::Value::Null
+                } else {
+                    json!("array")
+                };
+                Button::new()
+                    .label(label.clone())
+                    .method(ButtonMethod::Update)
+                    .args(json!([
+                        { "visible": visible },
+                        {
+                            "title": { "text": title },
+                            "xaxis": {
+                                "title": { "text": x_label },
+                                "type": x_axis_type,
+                                "categoryorder": category_order,
+                                "categoryarray": category_array,
+                                "fixedrange": lock_axes
+                            },
+                            "yaxis": {
+                                "title": { "text": y_label },
+                                "fixedrange": lock_axes
+                            },
+                            "dragmode": if *lock_axes { "pan" } else { "zoom" }
+                        }
+                    ]))
+            },
+        )
+        .collect();
+
+    let metrics_menu = UpdateMenu::new()
+        .ty(UpdateMenuType::Dropdown)
+        .buttons(metric_buttons)
         .background_color("#FFFFFF")
         .border_color("#CBD5E1")
         .border_width(1)
         .font(Font::new().size(12).color("#0F172A"))
-        .active(0)
-        .x(0.62)
+        .active(4)
+        .x(0.01)
         .y(1.22);
 
-    let layout = Layout::new()
+    let metrics_layout = Layout::new()
         .title(
-            Title::with_text("Blammo QC Report").font(
+            Title::with_text("Read-length distribution").font(
                 Font::new()
                     .family("IBM Plex Sans, Arial, sans-serif")
-                    .size(24)
+                    .size(22)
                     .color("#0F172A"),
             ),
         )
-        .height(760)
+        .height(680)
         .bar_mode(BarMode::Group)
         .drag_mode(DragMode::Zoom)
         .font(
@@ -342,7 +531,9 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
         )
         .x_axis(
             Axis::new()
-                .title("Sample")
+                .title("Read length")
+                .type_(AxisType::Linear)
+                .fixed_range(false)
                 .auto_margin(true)
                 .line_color("#CBD5E1")
                 .grid_color("#E2E8F0")
@@ -354,7 +545,8 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
         )
         .y_axis(
             Axis::new()
-                .title("Soft-clipped bases")
+                .title("Reads")
+                .fixed_range(false)
                 .auto_margin(true)
                 .line_color("#CBD5E1")
                 .grid_color("#E2E8F0")
@@ -364,26 +556,46 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
                 .spike_dash(DashType::Dot)
                 .zero_line(false),
         )
-        .update_menus(vec![metric_menu, y_scale_menu]);
-    plot.set_layout(layout);
-    plot.set_configuration(
+        .update_menus(vec![metrics_menu]);
+    metrics_plot.set_layout(metrics_layout);
+    metrics_plot.set_configuration(
         Configuration::new()
             .responsive(true)
-            .scroll_zoom(true)
+            .scroll_zoom(false)
             .display_logo(false)
             .display_mode_bar(DisplayModeBar::True)
             .double_click(DoubleClick::ResetAutoSize)
-            .mode_bar_buttons_to_remove(vec![ModeBarButtonName::SendDataToCloud])
+            .mode_bar_buttons_to_remove(vec![
+                ModeBarButtonName::SendDataToCloud,
+                ModeBarButtonName::Zoom2d,
+                ModeBarButtonName::Pan2d,
+                ModeBarButtonName::Select2d,
+                ModeBarButtonName::Lasso2d,
+                ModeBarButtonName::ZoomIn2d,
+                ModeBarButtonName::ZoomOut2d,
+                ModeBarButtonName::AutoScale2d,
+                ModeBarButtonName::ResetScale2d,
+            ])
             .to_image_button_options(
                 ToImageButtonOptions::new()
                     .format(ImageButtonFormats::Png)
-                    .filename("blammo-qc-report")
+                    .filename("blammo-qc-metrics")
                     .height(900)
                     .width(1500)
                     .scale(2),
             ),
     );
-    plot.write_html(path);
+
+    let html = compose_two_plot_html(report, &depth_plot, &metrics_plot);
+    let file = File::create(path)
+        .with_context(|| format!("failed to create HTML output {}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    writer
+        .write_all(html.as_bytes())
+        .with_context(|| format!("failed to write HTML output {}", path.display()))?;
+    writer
+        .flush()
+        .with_context(|| format!("failed to flush HTML output {}", path.display()))?;
     Ok(())
 }
 
@@ -396,22 +608,381 @@ fn sample_count(sample: &SampleQc, label: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn trace_is_visible(trace_view: &TraceView, selection: &ViewSelection) -> bool {
+fn metric_trace_is_visible(trace_view: &MetricTraceView, selection: &MetricSelection) -> bool {
     match (trace_view, selection) {
-        (TraceView::SoftClips, ViewSelection::SoftClips) => true,
-        (TraceView::Unmapped, ViewSelection::Unmapped) => true,
-        (TraceView::MismatchByBaseQuality, ViewSelection::MismatchByBaseQuality) => true,
-        (TraceView::ReadLength, ViewSelection::ReadLength) => true,
-        (
-            TraceView::Depth {
-                chromosome: trace_chromosome,
-            },
-            ViewSelection::Depth {
-                chromosome: selected_chromosome,
-            },
-        ) => trace_chromosome == selected_chromosome,
+        (MetricTraceView::MappedReads, MetricSelection::MappedReads) => true,
+        (MetricTraceView::SoftClips, MetricSelection::SoftClips) => true,
+        (MetricTraceView::Unmapped, MetricSelection::Unmapped) => true,
+        (MetricTraceView::MismatchByBaseQuality, MetricSelection::MismatchByBaseQuality) => true,
+        (MetricTraceView::ReadLength, MetricSelection::ReadLength) => true,
         _ => false,
     }
+}
+
+fn compose_two_plot_html(report: &QcReport, depth_plot: &Plot, metrics_plot: &Plot) -> String {
+    let asset_bundle = extract_plotly_asset_bundle(&depth_plot.to_html()).unwrap_or_else(|| {
+        r#"<script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>"#
+            .to_string()
+    });
+    let depth_inline = depth_plot.to_inline_html(Some("depth-distribution-plot"));
+    let metrics_inline = metrics_plot.to_inline_html(Some("metrics-plot"));
+    let metrics_table = build_non_depth_metrics_table(report);
+    let sample_count = report.samples.len();
+    let tool_version = escape_html(&report.tool_version);
+    let generated_at = report.run_timestamp.to_rfc3339();
+    let depth_scope = if report.settings.depth_scope == "reference_bases" {
+        "Reference bases (includes depth 0)"
+    } else {
+        "Covered bases only"
+    };
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Blammo QC Report</title>
+    <style>
+        :root {{
+            --bg-top: #f4f7fb;
+            --bg-bottom: #e8eef7;
+            --ink: #0f172a;
+            --muted: #475569;
+            --card: rgba(255, 255, 255, 0.84);
+            --stroke: rgba(148, 163, 184, 0.28);
+            --accent-a: #0ea5e9;
+            --accent-b: #1d4ed8;
+            --shadow: 0 14px 40px rgba(15, 23, 42, 0.12);
+            --radius-xl: 20px;
+            --radius-md: 12px;
+        }}
+        * {{
+            box-sizing: border-box;
+        }}
+        body {{
+            margin: 0;
+            color: var(--ink);
+            font-family: "IBM Plex Sans", Arial, sans-serif;
+            background:
+                radial-gradient(900px 420px at 92% -6%, rgba(14, 165, 233, 0.18), transparent 60%),
+                radial-gradient(820px 440px at -8% 10%, rgba(29, 78, 216, 0.14), transparent 58%),
+                linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
+        }}
+        .report-layout {{
+            max-width: 1620px;
+            margin: 0 auto;
+            padding: 28px 24px 36px 24px;
+        }}
+        .hero {{
+            margin-bottom: 24px;
+            border-radius: var(--radius-xl);
+            border: 1px solid var(--stroke);
+            background:
+                linear-gradient(135deg, rgba(255, 255, 255, 0.93), rgba(241, 245, 249, 0.8));
+            box-shadow: var(--shadow);
+            padding: 22px 22px 18px 22px;
+        }}
+        .hero h1 {{
+            margin: 0;
+            font-size: 28px;
+            line-height: 1.15;
+            letter-spacing: -0.02em;
+        }}
+        .hero p {{
+            margin: 8px 0 0 0;
+            color: var(--muted);
+            font-size: 14px;
+        }}
+        .meta-grid {{
+            margin-top: 16px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 10px;
+        }}
+        .meta-pill {{
+            border: 1px solid rgba(148, 163, 184, 0.32);
+            border-radius: 10px;
+            background: rgba(248, 250, 252, 0.85);
+            padding: 10px 12px;
+        }}
+        .meta-pill .label {{
+            display: block;
+            color: #64748b;
+            font-size: 11px;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }}
+        .meta-pill .value {{
+            display: block;
+            margin-top: 4px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #0b1220;
+        }}
+        .plot-section {{
+            margin-bottom: 24px;
+            border-radius: var(--radius-xl);
+            border: 1px solid var(--stroke);
+            background: var(--card);
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(6px);
+            overflow: hidden;
+        }}
+        .section-head {{
+            padding: 18px 22px 8px 22px;
+        }}
+        .section-head h2 {{
+            margin: 0;
+            font-size: 21px;
+            line-height: 1.3;
+            font-weight: 600;
+        }}
+        .section-head p {{
+            margin: 6px 0 0 0;
+            font-size: 13px;
+            color: var(--muted);
+        }}
+        .section-body {{
+            padding: 0 14px 14px 14px;
+        }}
+        .section-body .plotly-graph-div {{
+            border-radius: var(--radius-md);
+        }}
+        .metrics-table-wrap {{
+            margin-top: 20px;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.96);
+            overflow-x: auto;
+        }}
+        .metrics-table {{
+            width: 100%;
+            min-width: 1320px;
+            border-collapse: collapse;
+            font-size: 12px;
+        }}
+        .metrics-table thead th {{
+            position: sticky;
+            top: 0;
+            z-index: 2;
+        }}
+        .metrics-table th,
+        .metrics-table td {{
+            padding: 9px 10px;
+            border-bottom: 1px solid #e2e8f0;
+            text-align: right;
+            white-space: nowrap;
+        }}
+        .metrics-table th {{
+            text-align: right;
+            background: #eef2f7;
+            font-weight: 600;
+            color: #1e293b;
+        }}
+        .metrics-table th:first-child,
+        .metrics-table td:first-child {{
+            text-align: left;
+            position: sticky;
+            left: 0;
+            background: #f8fafc;
+            z-index: 1;
+        }}
+        .metrics-table th:first-child {{
+            z-index: 3;
+        }}
+        .metrics-table tbody tr:hover {{
+            background: #f8fafc;
+        }}
+        .metrics-table tbody tr:hover td:first-child {{
+            background: #f1f5f9;
+        }}
+        @media (max-width: 760px) {{
+            .report-layout {{
+                padding: 16px 10px 24px 10px;
+            }}
+            .hero {{
+                padding: 14px;
+            }}
+            .hero h1 {{
+                font-size: 23px;
+            }}
+            .section-head {{
+                padding: 14px 14px 8px 14px;
+            }}
+            .section-head h2 {{
+                font-size: 18px;
+            }}
+            .section-body {{
+                padding: 0 8px 10px 8px;
+            }}
+        }}
+    </style>
+    {asset_bundle}
+</head>
+<body>
+    <main class="report-layout">
+        <header class="hero">
+            <h1>Blammo QC Report</h1>
+            <p>Sequencing QC summary across {sample_count} sample(s).</p>
+            <div class="meta-grid">
+                <div class="meta-pill">
+                    <span class="label">Tool Version</span>
+                    <span class="value">{tool_version}</span>
+                </div>
+                <div class="meta-pill">
+                    <span class="label">Generated</span>
+                    <span class="value">{generated_at}</span>
+                </div>
+                <div class="meta-pill">
+                    <span class="label">Depth Scope</span>
+                    <span class="value">{depth_scope}</span>
+                </div>
+            </div>
+        </header>
+        <section class="plot-section">
+            <div class="section-head">
+                <h2>Depth Distribution</h2>
+                <p>Defaults to genome-wide depth. Use the selector to switch chromosomes.</p>
+            </div>
+            <div class="section-body">
+                {depth_inline}
+            </div>
+        </section>
+        <section class="plot-section">
+            <div class="section-head">
+                <h2>Other QC Metrics</h2>
+                <p>Defaults to mapped reads; switch other non-depth metrics from the dropdown.</p>
+            </div>
+            <div class="section-body">
+                {metrics_inline}
+                {metrics_table}
+            </div>
+        </section>
+    </main>
+</body>
+</html>
+"#
+    )
+}
+
+fn extract_plotly_asset_bundle(full_html: &str) -> Option<String> {
+    let start_marker =
+        r#"<script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>"#;
+    let end_marker = r#"<div id="plotly-html-element""#;
+    let start = full_html.find(start_marker)?;
+    let end = full_html.find(end_marker)?;
+    if start >= end {
+        return None;
+    }
+    Some(full_html[start..end].trim().to_string())
+}
+
+fn build_non_depth_metrics_table(report: &QcReport) -> String {
+    let mut html = String::new();
+    html.push_str("<div class=\"metrics-table-wrap\"><table class=\"metrics-table\"><thead><tr>");
+    html.push_str("<th>Sample</th>");
+    html.push_str("<th>Total reads seen</th>");
+    html.push_str("<th>Mapped reads</th>");
+    html.push_str("<th>Unmapped reads</th>");
+    html.push_str("<th>Duplicates excluded</th>");
+    html.push_str("<th>Soft-clipped bases</th>");
+    html.push_str("<th>Reads with soft clips</th>");
+    html.push_str("<th>NM sum</th>");
+    html.push_str("<th>BQ 0-9 mismatches</th>");
+    html.push_str("<th>BQ 10-19 mismatches</th>");
+    html.push_str("<th>BQ 20-29 mismatches</th>");
+    html.push_str("<th>BQ 30-39 mismatches</th>");
+    html.push_str("<th>BQ 40+ mismatches</th>");
+    html.push_str("<th>Read length min</th>");
+    html.push_str("<th>Read length p10</th>");
+    html.push_str("<th>Read length median</th>");
+    html.push_str("<th>Read length mean</th>");
+    html.push_str("<th>Read length p90</th>");
+    html.push_str("<th>Read length max</th>");
+    html.push_str("<th>Warnings</th>");
+    html.push_str("</tr></thead><tbody>");
+
+    for sample in &report.samples {
+        html.push_str("<tr>");
+        html.push_str(&format!("<td>{}</td>", escape_html(&sample.sample_id)));
+        html.push_str(&format!("<td>{}</td>", sample.counts.total_records_seen));
+        html.push_str(&format!(
+            "<td>{}</td>",
+            sample.counts.primary_mapped_reads_used
+        ));
+        html.push_str(&format!("<td>{}</td>", sample.counts.unmapped_reads));
+        html.push_str(&format!(
+            "<td>{}</td>",
+            sample.counts.duplicate_reads_excluded
+        ));
+        html.push_str(&format!(
+            "<td>{}</td>",
+            sample.soft_clips.total_soft_clipped_bases
+        ));
+        html.push_str(&format!(
+            "<td>{}</td>",
+            sample.soft_clips.reads_with_soft_clips
+        ));
+        html.push_str(&format!("<td>{}</td>", sample.mismatches.nm_sum));
+        html.push_str(&format!("<td>{}</td>", sample_count(sample, "0-9")));
+        html.push_str(&format!("<td>{}</td>", sample_count(sample, "10-19")));
+        html.push_str(&format!("<td>{}</td>", sample_count(sample, "20-29")));
+        html.push_str(&format!("<td>{}</td>", sample_count(sample, "30-39")));
+        html.push_str(&format!("<td>{}</td>", sample_count(sample, "40+")));
+        html.push_str(&format!("<td>{}</td>", sample.read_length.min));
+        html.push_str(&format!("<td>{}</td>", sample.read_length.p10));
+        html.push_str(&format!("<td>{:.2}</td>", sample.read_length.median));
+        html.push_str(&format!("<td>{:.2}</td>", sample.read_length.mean));
+        html.push_str(&format!("<td>{}</td>", sample.read_length.p90));
+        html.push_str(&format!("<td>{}</td>", sample.read_length.max));
+        html.push_str(&format!("<td>{}</td>", sample.warnings.len()));
+        html.push_str("</tr>");
+    }
+
+    html.push_str("</tbody></table></div>");
+    html
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn sort_depth_chromosomes(chromosomes: &mut [String]) {
+    chromosomes.sort_by_key(|chromosome| chromosome_sort_key(chromosome));
+}
+
+fn chromosome_sort_key(name: &str) -> (u8, u16, String) {
+    let trimmed = name.trim();
+    let normalized = trimmed
+        .strip_prefix("chr")
+        .or_else(|| trimmed.strip_prefix("CHR"))
+        .unwrap_or(trimmed);
+
+    if let Ok(num) = normalized.parse::<u16>() {
+        if (1..=22).contains(&num) {
+            return (0, num, String::new());
+        }
+    }
+    if normalized.eq_ignore_ascii_case("x") {
+        return (0, 23, String::new());
+    }
+    if normalized.eq_ignore_ascii_case("y") {
+        return (0, 24, String::new());
+    }
+
+    (1, u16::MAX, trimmed.to_ascii_lowercase())
 }
 
 fn histogram_points(hist: &std::collections::BTreeMap<u32, u64>) -> (Vec<u32>, Vec<u64>) {
@@ -447,6 +1018,36 @@ fn depth_points(hist: &[u64]) -> (Vec<u32>, Vec<u64>) {
         y.push(hist[depth]);
     }
     (x, y)
+}
+
+fn depth_x_max_from_histogram(hist: &[u64]) -> u32 {
+    if hist.is_empty() {
+        return 1;
+    }
+
+    let upper = usize::min(hist.len(), DEPTH_HIST_BINS);
+    let total_bases: u64 = hist.iter().take(upper).skip(1).sum();
+    if total_bases == 0 {
+        return 1;
+    }
+    let threshold = (total_bases + 199) / 200; // 0.5% of total bases, rounded up.
+
+    let Some(mut bin_index) = hist
+        .iter()
+        .take(upper)
+        .enumerate()
+        .skip(1)
+        .rfind(|(_, count)| **count > 0)
+        .map(|(depth, _)| depth)
+    else {
+        return 1;
+    };
+
+    while bin_index > 1 && hist[bin_index] < threshold {
+        bin_index -= 1;
+    }
+
+    bin_index as u32
 }
 
 fn select_depth_contigs(report: &QcReport, plot_max_contigs: usize) -> (Vec<String>, usize) {
@@ -565,22 +1166,24 @@ fn canonicalize_json_chromosome(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        TraceView, ViewSelection, canonicalize_json_chromosome, depth_points, trace_is_visible,
+        MetricSelection, MetricTraceView, canonicalize_json_chromosome, depth_points,
+        depth_x_max_from_histogram, metric_trace_is_visible, sort_depth_chromosomes,
     };
 
     #[test]
-    fn depth_trace_visibility_matches_selected_chromosome() {
-        let trace = TraceView::Depth {
-            chromosome: "chr1".to_string(),
-        };
-        let selected_chr1 = ViewSelection::Depth {
-            chromosome: "chr1".to_string(),
-        };
-        let selected_chr2 = ViewSelection::Depth {
-            chromosome: "chr2".to_string(),
-        };
-        assert!(trace_is_visible(&trace, &selected_chr1));
-        assert!(!trace_is_visible(&trace, &selected_chr2));
+    fn metric_trace_visibility_matches_selected_metric() {
+        assert!(metric_trace_is_visible(
+            &MetricTraceView::MappedReads,
+            &MetricSelection::MappedReads
+        ));
+        assert!(!metric_trace_is_visible(
+            &MetricTraceView::MappedReads,
+            &MetricSelection::Unmapped
+        ));
+        assert!(metric_trace_is_visible(
+            &MetricTraceView::ReadLength,
+            &MetricSelection::ReadLength
+        ));
     }
 
     #[test]
@@ -591,6 +1194,19 @@ mod tests {
         let (x, y) = depth_points(&hist);
         assert_eq!(x, vec![1, 2, 3]);
         assert_eq!(y, vec![5, 0, 2]);
+    }
+
+    #[test]
+    fn depth_x_max_trims_sparse_tail_bins() {
+        let mut hist = vec![0_u64; 16];
+        hist[1] = 600;
+        hist[2] = 250;
+        hist[3] = 120;
+        hist[4] = 20;
+        hist[5] = 5;
+        hist[6] = 4;
+        hist[7] = 1;
+        assert_eq!(depth_x_max_from_histogram(&hist), 5);
     }
 
     #[test]
@@ -610,5 +1226,22 @@ mod tests {
         );
         assert_eq!(canonicalize_json_chromosome("chrM"), None);
         assert_eq!(canonicalize_json_chromosome("GL000207.1"), None);
+    }
+
+    #[test]
+    fn depth_chromosome_sort_is_human_readable() {
+        let mut chromosomes = vec![
+            "chr10".to_string(),
+            "chr2".to_string(),
+            "chrX".to_string(),
+            "chr1".to_string(),
+            "GL000192.1".to_string(),
+            "chrY".to_string(),
+        ];
+        sort_depth_chromosomes(&mut chromosomes);
+        assert_eq!(
+            chromosomes,
+            vec!["chr1", "chr2", "chr10", "chrX", "chrY", "GL000192.1"]
+        );
     }
 }

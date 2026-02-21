@@ -8,18 +8,18 @@ use clap::{Parser, ValueEnum};
     name = "blammo-qc",
     version,
     before_help = concat!("blammo-qc ", env!("CARGO_PKG_VERSION")),
-    about = "Compute BAM/CRAM QC metrics and generate JSON + Plotly HTML reports."
+    about = "Compute BAM/CRAM QC metrics and generate optional JSON plus Plotly HTML reports."
 )]
 pub struct Cli {
     /// Input BAM/CRAM files (one or more).
     #[arg(required = true)]
     pub inputs: Vec<PathBuf>,
 
-    /// Output JSON report path.
-    #[arg(long, default_value = "qc.json")]
-    pub output_json: PathBuf,
+    /// Output JSON report path (optional; omitted unless specified).
+    #[arg(long)]
+    pub output_json: Option<PathBuf>,
 
-    /// Output HTML report path. Defaults to <output-json-stem>.html.
+    /// Output HTML report path. Defaults to <output-json-stem>.html or qc.html when --output-json is not set.
     #[arg(long)]
     pub output_html: Option<PathBuf>,
 
@@ -71,7 +71,7 @@ pub struct SampleInput {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub inputs: Vec<SampleInput>,
-    pub output_json: PathBuf,
+    pub output_json: Option<PathBuf>,
     pub output_html: PathBuf,
     pub reference: Option<PathBuf>,
     pub min_base_quality: u8,
@@ -97,16 +97,18 @@ impl Cli {
         let threads = self.threads.unwrap_or_else(num_cpus::get).max(1);
         let output_html = self
             .output_html
-            .unwrap_or_else(|| default_html_path(&self.output_json));
+            .unwrap_or_else(|| default_html_path_from_json(self.output_json.as_deref()));
 
-        if let Some(parent) = self.output_json.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "failed to create output JSON directory {}",
-                        parent.display()
-                    )
-                })?;
+        if let Some(output_json) = &self.output_json {
+            if let Some(parent) = output_json.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!(
+                            "failed to create output JSON directory {}",
+                            parent.display()
+                        )
+                    })?;
+                }
             }
         }
         if let Some(parent) = output_html.parent() {
@@ -152,13 +154,25 @@ fn default_html_path(output_json: &Path) -> PathBuf {
     html
 }
 
+fn default_html_path_from_json(output_json: Option<&Path>) -> PathBuf {
+    output_json
+        .map(default_html_path)
+        .unwrap_or_else(|| PathBuf::from("qc.html"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::default_html_path;
+    use super::{default_html_path, default_html_path_from_json};
 
     #[test]
     fn derives_default_html_path() {
         let path = default_html_path(std::path::Path::new("out/report.json"));
         assert_eq!(path.to_string_lossy(), "out/report.html");
+    }
+
+    #[test]
+    fn derives_default_html_path_without_json_output() {
+        let path = default_html_path_from_json(None);
+        assert_eq!(path.to_string_lossy(), "qc.html");
     }
 }
