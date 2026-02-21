@@ -19,7 +19,7 @@ pub struct Cli {
     #[arg(long)]
     pub output_json: Option<PathBuf>,
 
-    /// Output HTML report path. Defaults to <output-json-stem>.html or qc.html when --output-json is not set.
+    /// Output HTML report path. Defaults to blammo.html.
     #[arg(long)]
     pub output_html: Option<PathBuf>,
 
@@ -97,7 +97,7 @@ impl Cli {
         let threads = self.threads.unwrap_or_else(num_cpus::get).max(1);
         let output_html = self
             .output_html
-            .unwrap_or_else(|| default_html_path_from_json(self.output_json.as_deref()));
+            .unwrap_or_else(|| PathBuf::from("blammo.html"));
 
         if let Some(output_json) = &self.output_json {
             if let Some(parent) = output_json.parent() {
@@ -148,31 +148,13 @@ pub fn is_cram_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn default_html_path(output_json: &Path) -> PathBuf {
-    let mut html = output_json.to_path_buf();
-    html.set_extension("html");
-    html
-}
-
-fn default_html_path_from_json(output_json: Option<&Path>) -> PathBuf {
-    output_json
-        .map(default_html_path)
-        .unwrap_or_else(|| PathBuf::from("qc.html"))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{default_html_path, default_html_path_from_json};
+    use std::path::PathBuf;
 
     #[test]
-    fn derives_default_html_path() {
-        let path = default_html_path(std::path::Path::new("out/report.json"));
-        assert_eq!(path.to_string_lossy(), "out/report.html");
-    }
-
-    #[test]
-    fn derives_default_html_path_without_json_output() {
-        let path = default_html_path_from_json(None);
-        assert_eq!(path.to_string_lossy(), "qc.html");
+    fn default_html_path_is_blammo_html() {
+        let path = PathBuf::from("blammo.html");
+        assert_eq!(path.to_string_lossy(), "blammo.html");
     }
 }

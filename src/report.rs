@@ -13,7 +13,8 @@ use plotly::{
         DisplayModeBar, DoubleClick, ImageButtonFormats, ModeBarButtonName, ToImageButtonOptions,
     },
     layout::{
-        Axis, AxisType, BarMode, DragMode, HoverMode, Legend, Margin, ModeBar, SpikeMode,
+        Axis, AxisType, BarMode, DragMode, HoverMode, Legend, Margin, ModeBar, RangeMode,
+        SpikeMode,
         update_menu::{Button, ButtonMethod, UpdateMenu, UpdateMenuType},
     },
 };
@@ -197,9 +198,10 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
                             "type": "linear",
                             "autorange": false,
                             "range": [0, x_max],
+                            "rangemode": "nonnegative",
                             "fixedrange": false
                         },
-                        "yaxis": { "title": { "text": depth_y_axis }, "fixedrange": false },
+                        "yaxis": { "title": { "text": depth_y_axis }, "fixedrange": true },
                         "dragmode": "zoom"
                     }
                 ]))
@@ -265,6 +267,7 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
                 .type_(AxisType::Linear)
                 .auto_range(false)
                 .range(vec![0.0, depth_default_x_max as f64])
+                .range_mode(RangeMode::NonNegative)
                 .auto_margin(true)
                 .line_color("#CBD5E1")
                 .grid_color("#E2E8F0")
@@ -277,6 +280,7 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
         .y_axis(
             Axis::new()
                 .title(depth_y_axis.clone())
+                .fixed_range(true)
                 .auto_margin(true)
                 .line_color("#CBD5E1")
                 .grid_color("#E2E8F0")
@@ -295,7 +299,10 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             .display_logo(false)
             .display_mode_bar(DisplayModeBar::True)
             .double_click(DoubleClick::ResetAutoSize)
-            .mode_bar_buttons_to_remove(vec![ModeBarButtonName::SendDataToCloud])
+            .mode_bar_buttons_to_remove(vec![
+                ModeBarButtonName::SendDataToCloud,
+                ModeBarButtonName::Pan2d,
+            ])
             .to_image_button_options(
                 ToImageButtonOptions::new()
                     .format(ImageButtonFormats::Png)
@@ -367,17 +374,23 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
     }
 
     for sample in &report.samples {
-        let (x, y) = histogram_points(&sample.read_length.histogram);
+        let (x, y) = read_length_points(&sample.read_length.histogram);
         metrics_plot.add_trace(
             Scatter::new(x, y)
                 .mode(Mode::Lines)
                 .line(Line::new().width(2.0))
-                .hover_template("Read length: %{x}<br>Reads: %{y}<extra></extra>")
+                .hover_template("Read length: %{x}<br>Reads: %{y:.2f}<extra></extra>")
                 .name(format!("{} read length", sample.sample_id))
                 .visible(Visible::True),
         );
         metric_trace_views.push(MetricTraceView::ReadLength);
     }
+    let read_length_x_max = read_length_x_max_from_histograms(
+        report
+            .samples
+            .iter()
+            .map(|sample| &sample.read_length.histogram),
+    ) as f64;
 
     let metric_options = vec![
         (
@@ -389,6 +402,9 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             "category".to_string(),
             json!(sample_ids.clone()),
             true,
+            true,
+            false,
+            None,
         ),
         (
             "Soft clips".to_string(),
@@ -399,6 +415,9 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             "category".to_string(),
             json!(sample_ids.clone()),
             true,
+            true,
+            false,
+            None,
         ),
         (
             "Unmapped reads".to_string(),
@@ -409,6 +428,9 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             "category".to_string(),
             json!(sample_ids.clone()),
             true,
+            true,
+            false,
+            None,
         ),
         (
             "Mismatches by base quality".to_string(),
@@ -419,6 +441,9 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             "category".to_string(),
             json!(BQ_BIN_LABELS),
             false,
+            false,
+            false,
+            None,
         ),
         (
             "Read length distribution".to_string(),
@@ -429,9 +454,11 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             "linear".to_string(),
             json!(null),
             false,
+            true,
+            true,
+            Some(read_length_x_max),
         ),
     ];
-
     let metric_buttons: Vec<Button> = metric_options
         .iter()
         .map(
@@ -443,7 +470,10 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
                 y_label,
                 x_axis_type,
                 category_array,
-                lock_axes,
+                x_fixed,
+                y_fixed,
+                x_nonnegative,
+                x_max,
             )| {
                 let visible: Vec<bool> = metric_trace_views
                     .iter()
@@ -454,6 +484,16 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
                 } else {
                     json!("array")
                 };
+                let x_range_mode = if *x_nonnegative {
+                    json!("nonnegative")
+                } else {
+                    serde_json::Value::Null
+                };
+                let x_autorange = x_max.is_none();
+                let x_range = x_max
+                    .map(|max| json!([0.0, max]))
+                    .unwrap_or(serde_json::Value::Null);
+                let drag_mode = if *x_fixed && *y_fixed { "pan" } else { "zoom" };
                 Button::new()
                     .label(label.clone())
                     .method(ButtonMethod::Update)
@@ -466,13 +506,16 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
                                 "type": x_axis_type,
                                 "categoryorder": category_order,
                                 "categoryarray": category_array,
-                                "fixedrange": lock_axes
+                                "autorange": x_autorange,
+                                "range": x_range,
+                                "rangemode": x_range_mode,
+                                "fixedrange": x_fixed
                             },
                             "yaxis": {
                                 "title": { "text": y_label },
-                                "fixedrange": lock_axes
+                                "fixedrange": y_fixed
                             },
-                            "dragmode": if *lock_axes { "pan" } else { "zoom" }
+                            "dragmode": drag_mode
                         }
                     ]))
             },
@@ -517,11 +560,11 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
         .margin(Margin::new().top(130).right(30).bottom(70).left(70))
         .legend(
             Legend::new()
-                .orientation(Orientation::Horizontal)
-                .x(0.0)
-                .x_anchor(Anchor::Left)
-                .y(1.10)
-                .y_anchor(Anchor::Bottom),
+                .orientation(Orientation::Vertical)
+                .x(0.99)
+                .x_anchor(Anchor::Right)
+                .y(0.99)
+                .y_anchor(Anchor::Top),
         )
         .mode_bar(
             ModeBar::new()
@@ -533,6 +576,9 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             Axis::new()
                 .title("Read length")
                 .type_(AxisType::Linear)
+                .auto_range(false)
+                .range(vec![0.0, read_length_x_max])
+                .range_mode(RangeMode::NonNegative)
                 .fixed_range(false)
                 .auto_margin(true)
                 .line_color("#CBD5E1")
@@ -546,7 +592,7 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
         .y_axis(
             Axis::new()
                 .title("Reads")
-                .fixed_range(false)
+                .fixed_range(true)
                 .auto_margin(true)
                 .line_color("#CBD5E1")
                 .grid_color("#E2E8F0")
@@ -689,6 +735,14 @@ fn compose_two_plot_html(report: &QcReport, depth_plot: &Plot, metrics_plot: &Pl
             line-height: 1.15;
             letter-spacing: -0.02em;
         }}
+        .hero h1 .title-link {{
+            color: inherit;
+            text-decoration: none;
+            border-bottom: 2px solid rgba(14, 165, 233, 0.35);
+        }}
+        .hero h1 .title-link:hover {{
+            border-bottom-color: rgba(29, 78, 216, 0.65);
+        }}
         .hero p {{
             margin: 8px 0 0 0;
             color: var(--muted);
@@ -823,7 +877,7 @@ fn compose_two_plot_html(report: &QcReport, depth_plot: &Plot, metrics_plot: &Pl
 <body>
     <main class="report-layout">
         <header class="hero">
-            <h1>Blammo QC Report</h1>
+            <h1><a class="title-link" href="https://github.com/brentp/blammo-qc" target="_blank" rel="noopener noreferrer">Blammo QC Report</a></h1>
             <p>Sequencing QC summary across {sample_count} sample(s).</p>
             <div class="meta-grid">
                 <div class="meta-pill">
@@ -855,8 +909,8 @@ fn compose_two_plot_html(report: &QcReport, depth_plot: &Plot, metrics_plot: &Pl
                 <p>Defaults to mapped reads; switch other non-depth metrics from the dropdown.</p>
             </div>
             <div class="section-body">
-                {metrics_inline}
                 {metrics_table}
+                {metrics_inline}
             </div>
         </section>
     </main>
@@ -882,18 +936,14 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
     let mut html = String::new();
     html.push_str("<div class=\"metrics-table-wrap\"><table class=\"metrics-table\"><thead><tr>");
     html.push_str("<th>Sample</th>");
+    html.push_str("<th>Median depth</th>");
+    html.push_str("<th>Mode depth</th>");
     html.push_str("<th>Total reads seen</th>");
     html.push_str("<th>Mapped reads</th>");
     html.push_str("<th>Unmapped reads</th>");
-    html.push_str("<th>Duplicates excluded</th>");
     html.push_str("<th>Soft-clipped bases</th>");
     html.push_str("<th>Reads with soft clips</th>");
     html.push_str("<th>NM sum</th>");
-    html.push_str("<th>BQ 0-9 mismatches</th>");
-    html.push_str("<th>BQ 10-19 mismatches</th>");
-    html.push_str("<th>BQ 20-29 mismatches</th>");
-    html.push_str("<th>BQ 30-39 mismatches</th>");
-    html.push_str("<th>BQ 40+ mismatches</th>");
     html.push_str("<th>Read length min</th>");
     html.push_str("<th>Read length p10</th>");
     html.push_str("<th>Read length median</th>");
@@ -901,20 +951,31 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
     html.push_str("<th>Read length p90</th>");
     html.push_str("<th>Read length max</th>");
     html.push_str("<th>Warnings</th>");
+    html.push_str("<th>BQ 0-9 mismatches</th>");
+    html.push_str("<th>BQ 10-19 mismatches</th>");
+    html.push_str("<th>BQ 20-29 mismatches</th>");
+    html.push_str("<th>BQ 30-39 mismatches</th>");
+    html.push_str("<th>BQ 40+ mismatches</th>");
     html.push_str("</tr></thead><tbody>");
 
     for sample in &report.samples {
+        let median_depth =
+            depth_median_from_histogram(&sample.depth_distribution.genome_wide_histogram);
+        let mode_depth =
+            depth_mode_from_histogram(&sample.depth_distribution.genome_wide_histogram);
+        let total_reads = sample.counts.total_records_seen;
         html.push_str("<tr>");
         html.push_str(&format!("<td>{}</td>", escape_html(&sample.sample_id)));
-        html.push_str(&format!("<td>{}</td>", sample.counts.total_records_seen));
+        html.push_str(&format!("<td>{}</td>", median_depth));
+        html.push_str(&format!("<td>{}</td>", mode_depth));
+        html.push_str(&format!("<td>{}</td>", total_reads));
         html.push_str(&format!(
             "<td>{}</td>",
-            sample.counts.primary_mapped_reads_used
+            format_count_with_percent(sample.counts.primary_mapped_reads_used, total_reads)
         ));
-        html.push_str(&format!("<td>{}</td>", sample.counts.unmapped_reads));
         html.push_str(&format!(
             "<td>{}</td>",
-            sample.counts.duplicate_reads_excluded
+            format_count_with_percent(sample.counts.unmapped_reads, total_reads)
         ));
         html.push_str(&format!(
             "<td>{}</td>",
@@ -925,11 +986,6 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
             sample.soft_clips.reads_with_soft_clips
         ));
         html.push_str(&format!("<td>{}</td>", sample.mismatches.nm_sum));
-        html.push_str(&format!("<td>{}</td>", sample_count(sample, "0-9")));
-        html.push_str(&format!("<td>{}</td>", sample_count(sample, "10-19")));
-        html.push_str(&format!("<td>{}</td>", sample_count(sample, "20-29")));
-        html.push_str(&format!("<td>{}</td>", sample_count(sample, "30-39")));
-        html.push_str(&format!("<td>{}</td>", sample_count(sample, "40+")));
         html.push_str(&format!("<td>{}</td>", sample.read_length.min));
         html.push_str(&format!("<td>{}</td>", sample.read_length.p10));
         html.push_str(&format!("<td>{:.2}</td>", sample.read_length.median));
@@ -937,6 +993,11 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
         html.push_str(&format!("<td>{}</td>", sample.read_length.p90));
         html.push_str(&format!("<td>{}</td>", sample.read_length.max));
         html.push_str(&format!("<td>{}</td>", sample.warnings.len()));
+        html.push_str(&format!("<td>{}</td>", sample_count(sample, "0-9")));
+        html.push_str(&format!("<td>{}</td>", sample_count(sample, "10-19")));
+        html.push_str(&format!("<td>{}</td>", sample_count(sample, "20-29")));
+        html.push_str(&format!("<td>{}</td>", sample_count(sample, "30-39")));
+        html.push_str(&format!("<td>{}</td>", sample_count(sample, "40+")));
         html.push_str("</tr>");
     }
 
@@ -957,6 +1018,43 @@ fn escape_html(value: &str) -> String {
         }
     }
     escaped
+}
+
+fn format_count_with_percent(count: u64, total: u64) -> String {
+    let percent = if total == 0 {
+        0.0
+    } else {
+        (count as f64 * 100.0) / total as f64
+    };
+    format!("{count} ({percent:.2}%)")
+}
+
+fn depth_median_from_histogram(hist: &[u64]) -> u32 {
+    let total: u64 = hist.iter().take(DEPTH_HIST_BINS).sum();
+    if total == 0 {
+        return 0;
+    }
+    let rank = (total - 1) / 2;
+    let mut cumulative = 0_u64;
+    for (depth, count) in hist.iter().take(DEPTH_HIST_BINS).enumerate() {
+        cumulative += *count;
+        if cumulative > rank {
+            return depth as u32;
+        }
+    }
+    0
+}
+
+fn depth_mode_from_histogram(hist: &[u64]) -> u32 {
+    let mut mode_depth = 0_u32;
+    let mut mode_count = 0_u64;
+    for (depth, count) in hist.iter().take(DEPTH_HIST_BINS).enumerate() {
+        if *count > mode_count {
+            mode_count = *count;
+            mode_depth = depth as u32;
+        }
+    }
+    mode_depth
 }
 
 fn sort_depth_chromosomes(chromosomes: &mut [String]) {
@@ -985,14 +1083,43 @@ fn chromosome_sort_key(name: &str) -> (u8, u16, String) {
     (1, u16::MAX, trimmed.to_ascii_lowercase())
 }
 
-fn histogram_points(hist: &std::collections::BTreeMap<u32, u64>) -> (Vec<u32>, Vec<u64>) {
+fn read_length_points(hist: &std::collections::BTreeMap<u32, u64>) -> (Vec<u32>, Vec<f64>) {
     let mut x = Vec::with_capacity(hist.len());
     let mut y = Vec::with_capacity(hist.len());
     for (read_len, count) in hist {
         x.push(*read_len);
-        y.push(*count);
+        if *read_len > 1_000 {
+            y.push(*count as f64 / 50.0);
+        } else {
+            y.push(*count as f64);
+        }
     }
     (x, y)
+}
+
+fn read_length_x_max_from_histograms<'a, I>(histograms: I) -> u32
+where
+    I: IntoIterator<Item = &'a BTreeMap<u32, u64>>,
+{
+    let mut max_with_more_than_one = 0_u32;
+    let mut max_nonzero = 0_u32;
+    for histogram in histograms {
+        for (read_len, count) in histogram {
+            if *count > 0 {
+                max_nonzero = max_nonzero.max(*read_len);
+            }
+            if *count > 1 {
+                max_with_more_than_one = max_with_more_than_one.max(*read_len);
+            }
+        }
+    }
+    if max_with_more_than_one > 0 {
+        max_with_more_than_one
+    } else if max_nonzero > 0 {
+        max_nonzero
+    } else {
+        1
+    }
 }
 
 fn depth_points(hist: &[u64]) -> (Vec<u32>, Vec<u64>) {
@@ -1030,7 +1157,7 @@ fn depth_x_max_from_histogram(hist: &[u64]) -> u32 {
     if total_bases == 0 {
         return 1;
     }
-    let threshold = (total_bases + 199) / 200; // 0.5% of total bases, rounded up.
+    let threshold = (total_bases + 1_999) / 2_000; // 0.05% of covered bases, rounded up.
 
     let Some(mut bin_index) = hist
         .iter()
@@ -1165,9 +1292,13 @@ fn canonicalize_json_chromosome(name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
-        MetricSelection, MetricTraceView, canonicalize_json_chromosome, depth_points,
-        depth_x_max_from_histogram, metric_trace_is_visible, sort_depth_chromosomes,
+        MetricSelection, MetricTraceView, canonicalize_json_chromosome,
+        depth_median_from_histogram, depth_mode_from_histogram, depth_points,
+        depth_x_max_from_histogram, format_count_with_percent, metric_trace_is_visible,
+        read_length_points, read_length_x_max_from_histograms, sort_depth_chromosomes,
     };
 
     #[test]
@@ -1197,16 +1328,55 @@ mod tests {
     }
 
     #[test]
-    fn depth_x_max_trims_sparse_tail_bins() {
+    fn depth_x_max_keeps_bins_until_point_zero_five_percent_threshold() {
         let mut hist = vec![0_u64; 16];
-        hist[1] = 600;
-        hist[2] = 250;
-        hist[3] = 120;
-        hist[4] = 20;
-        hist[5] = 5;
-        hist[6] = 4;
+        hist[1] = 3_000;
+        hist[2] = 700;
+        hist[3] = 200;
+        hist[4] = 60;
+        hist[5] = 30;
+        hist[6] = 2;
         hist[7] = 1;
-        assert_eq!(depth_x_max_from_histogram(&hist), 5);
+        assert_eq!(depth_x_max_from_histogram(&hist), 6);
+    }
+
+    #[test]
+    fn read_length_points_normalize_wide_bins() {
+        let mut hist = BTreeMap::new();
+        hist.insert(999, 20);
+        hist.insert(1000, 10);
+        hist.insert(1050, 100);
+        let (x, y) = read_length_points(&hist);
+        assert_eq!(x, vec![999, 1000, 1050]);
+        assert_eq!(y, vec![20.0, 10.0, 2.0]);
+    }
+
+    #[test]
+    fn read_length_x_max_uses_last_bin_with_more_than_one_read() {
+        let mut hist_a = BTreeMap::new();
+        hist_a.insert(900, 10);
+        hist_a.insert(1500, 1);
+        let mut hist_b = BTreeMap::new();
+        hist_b.insert(1200, 2);
+        hist_b.insert(2000, 1);
+        let x_max = read_length_x_max_from_histograms([&hist_a, &hist_b]);
+        assert_eq!(x_max, 1200);
+    }
+
+    #[test]
+    fn format_count_with_percent_uses_total_reads() {
+        assert_eq!(format_count_with_percent(9923, 10_000), "9923 (99.23%)");
+        assert_eq!(format_count_with_percent(0, 0), "0 (0.00%)");
+    }
+
+    #[test]
+    fn depth_summary_stats_use_histogram() {
+        let mut hist = vec![0_u64; 8];
+        hist[0] = 1;
+        hist[2] = 3;
+        hist[5] = 2;
+        assert_eq!(depth_mode_from_histogram(&hist), 2);
+        assert_eq!(depth_median_from_histogram(&hist), 2);
     }
 
     #[test]

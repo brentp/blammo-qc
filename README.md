@@ -7,9 +7,8 @@
 ## Example usage
 
 ```bash
-cargo run -- \
-  --output-json qc.json \
-  --depth-scope reference-bases \
-  --plot-max-contigs 30 \
-  sample1.bam sample2.cram --reference ref.fa
+blammo-qc \
+  --reference ref.fa \
+  --output-html blammo.cohort.html \
+  sample1.bam sample2.cram 
 ```
