@@ -1,0 +1,113 @@
+name: Build Release Binaries
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+jobs:
+  build-static-linux:
+    name: Linux static (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build static binary
+        run: cross build --locked --release --target ${{ matrix.target }}
+
+      - name: Verify static linkage
+        run: |
+          FILE_INFO="$(file target/${{ matrix.target }}/release/blammo-qc)"
+          echo "$FILE_INFO"
+          echo "$FILE_INFO" | grep -E "statically linked|static-pie linked"
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/blammo-qc dist/blammo-qc-${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blammo-qc-${{ matrix.target }}
+          path: dist/blammo-qc-${{ matrix.target }}
+
+  build-macos:
+    name: macOS (${{ matrix.target }})
+    runs-on: ${{ matrix.runs_on }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs_on: macos-15-intel
+            target: x86_64-apple-darwin
+          - runs_on: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build macOS binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/blammo-qc dist/blammo-qc-${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blammo-qc-${{ matrix.target }}
+          path: dist/blammo-qc-${{ matrix.target }}
+
+  upload-tag-assets:
+    name: Upload Tag Assets
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - build-static-linux
+      - build-macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: blammo-qc-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish binaries to tag release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/blammo-qc-*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -27,31 +27,23 @@ pub struct Cli {
     pub reference: Option<PathBuf>,
 
     /// Minimum base quality used in depth distribution.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 10)]
     pub min_base_quality: u8,
 
     /// Minimum mapping quality used in depth distribution.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 10)]
     pub min_mapping_quality: u8,
 
     /// Number of worker threads (defaults to logical CPUs).
     #[arg(long)]
     pub threads: Option<usize>,
 
-    /// Optional sample name overrides, in the same order as inputs.
-    #[arg(long = "sample-name")]
-    pub sample_names: Vec<String>,
-
-    /// Include duplicate-marked reads (default behavior excludes duplicates).
-    #[arg(long)]
-    pub include_duplicates: bool,
-
     /// Depth histogram basis: covered bases only, or full reference space (includes depth=0).
     #[arg(long, value_enum, default_value_t = DepthScope::CoveredBases)]
     pub depth_scope: DepthScope,
 
     /// Maximum number of per-contig depth views in HTML (remaining contigs are grouped as "Other").
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 25)]
     pub plot_max_contigs: usize,
 }
 
@@ -73,7 +65,6 @@ impl DepthScope {
 #[derive(Debug, Clone)]
 pub struct SampleInput {
     pub path: PathBuf,
-    pub sample_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -85,21 +76,12 @@ pub struct Config {
     pub min_base_quality: u8,
     pub min_mapping_quality: u8,
     pub threads: usize,
-    pub include_duplicates: bool,
     pub depth_scope: DepthScope,
     pub plot_max_contigs: usize,
 }
 
 impl Cli {
     pub fn into_config(self) -> Result<Config> {
-        if !self.sample_names.is_empty() && self.sample_names.len() != self.inputs.len() {
-            bail!(
-                "--sample-name count ({}) must match number of inputs ({})",
-                self.sample_names.len(),
-                self.inputs.len()
-            );
-        }
-
         let has_cram = self.inputs.iter().any(|path| is_cram_path(path));
         if has_cram && self.reference.is_none() {
             bail!("CRAM input detected; provide --reference <FASTA>");
@@ -140,15 +122,7 @@ impl Cli {
         let inputs = self
             .inputs
             .iter()
-            .enumerate()
-            .map(|(i, path)| SampleInput {
-                path: path.clone(),
-                sample_id: self
-                    .sample_names
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(|| infer_sample_name(path)),
-            })
+            .map(|path| SampleInput { path: path.clone() })
             .collect();
 
         Ok(Config {
@@ -159,7 +133,6 @@ impl Cli {
             min_base_quality: self.min_base_quality,
             min_mapping_quality: self.min_mapping_quality,
             threads,
-            include_duplicates: self.include_duplicates,
             depth_scope: self.depth_scope,
             plot_max_contigs: self.plot_max_contigs,
         })
@@ -176,13 +149,6 @@ fn default_html_path(output_json: &Path) -> PathBuf {
     let mut html = output_json.to_path_buf();
     html.set_extension("html");
     html
-}
-
-fn infer_sample_name(path: &Path) -> String {
-    path.file_stem()
-        .map(|stem| stem.to_string_lossy().to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
 #[cfg(test)]

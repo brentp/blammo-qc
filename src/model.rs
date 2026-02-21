@@ -20,7 +20,6 @@ pub struct RunSettings {
     pub min_base_quality: u8,
     pub min_mapping_quality: u8,
     pub threads: usize,
-    pub include_duplicates: bool,
     pub reference: Option<String>,
     pub depth_scope: String,
     pub plot_max_contigs: usize,

@@ -10,13 +10,18 @@ fn write_fixture_bam(path: &std::path::Path) {
             .push_tag(b"SN", &"chr1")
             .push_tag(b"LN", &100_u32),
     );
+    header.push_record(
+        HeaderRecord::new(b"RG")
+            .push_tag(b"ID", &"rg1")
+            .push_tag(b"SM", &"sample_from_rg"),
+    );
     let header_view = HeaderView::from_header(&header);
 
     let mut writer = Writer::from_path(path, &header, Format::Bam).expect("create fixture BAM");
     let sam_lines: [&[u8]; 4] = [
-        b"read1\t0\tchr1\t1\t60\t5M\t*\t0\t0\tACGTA\tIIIII\tNM:i:0\tMD:Z:5",
-        b"read2\t0\tchr1\t2\t60\t1S4M\t*\t0\t0\tTACGA\t!IIII\tNM:i:1\tMD:Z:2T1",
-        b"read3\t1024\tchr1\t3\t60\t5M\t*\t0\t0\tGGGGG\tIIIII\tNM:i:0\tMD:Z:5",
+        b"read1\t0\tchr1\t1\t60\t5M\t*\t0\t0\tACGTA\tIIIII\tNM:i:0\tMD:Z:5\tRG:Z:rg1",
+        b"read2\t0\tchr1\t2\t60\t1S4M\t*\t0\t0\tTACGA\t!IIII\tNM:i:1\tMD:Z:2T1\tRG:Z:rg1",
+        b"read3\t1024\tchr1\t3\t60\t5M\t*\t0\t0\tGGGGG\tIIIII\tNM:i:0\tMD:Z:5\tRG:Z:rg1",
         b"read4\t4\t*\t0\t0\t*\t*\t0\t0\tAAAAA\tIIIII",
     ];
 
@@ -82,6 +87,7 @@ fn cli_generates_expected_json_and_html_for_fixture_bam() {
 
     assert_eq!(json["samples"].as_array().expect("samples array").len(), 1);
     let sample = &json["samples"][0];
+    assert_eq!(sample["sample_id"], "sample_from_rg");
 
     assert_eq!(sample["counts"]["total_records_seen"], 4);
     assert_eq!(sample["counts"]["unmapped_reads"], 1);

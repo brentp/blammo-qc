@@ -23,7 +23,6 @@ pub struct ProcessingOptions<'a> {
     pub reference: Option<&'a Path>,
     pub min_base_quality: u8,
     pub min_mapping_quality: u8,
-    pub include_duplicates: bool,
     pub depth_scope: DepthScope,
 }
 
@@ -401,6 +400,7 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
     let target_lengths: Vec<u64> = (0..target_names.len())
         .map(|tid| reader.header().target_len(tid as u32).unwrap_or(0))
         .collect();
+    let sample_id = sample_id_from_header(reader.header(), &input.path);
     let mut depth_collector = DepthCollector::new(target_names, target_lengths, opts.depth_scope);
 
     let mut counts = ReadCounts::default();
@@ -422,7 +422,7 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
         })?;
         counts.total_records_seen += 1;
 
-        let classification = classify_record(&record, opts.include_duplicates);
+        let classification = classify_record(&record);
         if classification.is_unmapped {
             counts.unmapped_reads += 1;
         }
@@ -495,7 +495,7 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
     let warnings = build_warnings(warning_counts);
 
     Ok(SampleQc {
-        sample_id: input.sample_id.clone(),
+        sample_id,
         input_path: input.path.to_string_lossy().to_string(),
         counts,
         soft_clips,
@@ -513,16 +513,35 @@ struct RecordClassification {
     include_in_read_metrics: bool,
 }
 
-fn classify_record(record: &Record, include_duplicates: bool) -> RecordClassification {
+fn classify_record(record: &Record) -> RecordClassification {
     let is_unmapped = record.is_unmapped();
     let is_primary_mapped = !is_unmapped && !record.is_secondary() && !record.is_supplementary();
-    let duplicate_excluded = is_primary_mapped && record.is_duplicate() && !include_duplicates;
+    let duplicate_excluded = is_primary_mapped && record.is_duplicate();
     let include_in_read_metrics = is_primary_mapped && !duplicate_excluded;
     RecordClassification {
         is_unmapped,
         duplicate_excluded,
         include_in_read_metrics,
     }
+}
+
+fn sample_id_from_header(header: &bam::HeaderView, input_path: &Path) -> String {
+    let header_map = bam::Header::from_template(header).to_hashmap();
+    if let Some(read_groups) = header_map.get("RG") {
+        for read_group in read_groups {
+            if let Some(sample_name) = read_group.get("SM").filter(|name| !name.is_empty()) {
+                return sample_name.to_string();
+            }
+        }
+    }
+    fallback_sample_name(input_path)
+}
+
+fn fallback_sample_name(path: &Path) -> String {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
 fn update_soft_clip_metrics(record: &Record, soft_clips: &mut SoftClipSummary) {
@@ -820,7 +839,13 @@ fn build_warnings(counts: WarningCounters) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DepthCollector, Interval, classify_record, parse_md_mismatch_offsets};
+    use std::path::Path;
+
+    use rust_htslib::bam::{Header, HeaderView, header::HeaderRecord};
+
+    use super::{
+        DepthCollector, Interval, classify_record, parse_md_mismatch_offsets, sample_id_from_header,
+    };
     use crate::cli::DepthScope;
 
     #[test]
@@ -915,18 +940,48 @@ mod tests {
     }
 
     #[test]
-    fn record_classification_respects_duplicate_policy() {
+    fn record_classification_always_excludes_duplicates() {
         let mut record = rust_htslib::bam::Record::new();
         record.set_flags(0); // primary mapped
-        let no_dups = classify_record(&record, false);
-        assert!(no_dups.include_in_read_metrics);
+        let primary = classify_record(&record);
+        assert!(primary.include_in_read_metrics);
 
         record.set_flags(0x400); // duplicate
-        let filtered = classify_record(&record, false);
+        let filtered = classify_record(&record);
         assert!(filtered.duplicate_excluded);
         assert!(!filtered.include_in_read_metrics);
+    }
 
-        let included = classify_record(&record, true);
-        assert!(included.include_in_read_metrics);
+    #[test]
+    fn sample_id_prefers_read_group_sm_tag() {
+        let mut header = Header::new();
+        header.push_record(
+            HeaderRecord::new(b"SQ")
+                .push_tag(b"SN", &"chr1")
+                .push_tag(b"LN", &100_u32),
+        );
+        header.push_record(
+            HeaderRecord::new(b"RG")
+                .push_tag(b"ID", &"rg1")
+                .push_tag(b"SM", &"sample_from_rg"),
+        );
+        let header_view = HeaderView::from_header(&header);
+
+        let sample_id = sample_id_from_header(&header_view, Path::new("fallback.bam"));
+        assert_eq!(sample_id, "sample_from_rg");
+    }
+
+    #[test]
+    fn sample_id_falls_back_to_input_stem_when_rg_sm_missing() {
+        let mut header = Header::new();
+        header.push_record(
+            HeaderRecord::new(b"SQ")
+                .push_tag(b"SN", &"chr1")
+                .push_tag(b"LN", &100_u32),
+        );
+        let header_view = HeaderView::from_header(&header);
+
+        let sample_id = sample_id_from_header(&header_view, Path::new("fallback.bam"));
+        assert_eq!(sample_id, "fallback");
     }
 }

@@ -35,7 +35,6 @@ fn run() -> Result<()> {
         reference: config.reference.as_deref(),
         min_base_quality: config.min_base_quality,
         min_mapping_quality: config.min_mapping_quality,
-        include_duplicates: config.include_duplicates,
         depth_scope: config.depth_scope,
     };
 
@@ -58,7 +57,6 @@ fn run() -> Result<()> {
             min_base_quality: config.min_base_quality,
             min_mapping_quality: config.min_mapping_quality,
             threads: config.threads,
-            include_duplicates: config.include_duplicates,
             reference: config
                 .reference
                 .as_ref()
