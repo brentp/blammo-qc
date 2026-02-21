@@ -983,13 +983,16 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
         ));
         html.push_str(&format!(
             "<td>{}</td>",
-            sample.soft_clips.reads_with_soft_clips
+            format_count_with_percent(
+                sample.soft_clips.reads_with_soft_clips,
+                sample.counts.primary_mapped_reads_used
+            )
         ));
         html.push_str(&format!("<td>{}</td>", sample.mismatches.nm_sum));
         html.push_str(&format!("<td>{}</td>", sample.read_length.min));
         html.push_str(&format!("<td>{}</td>", sample.read_length.p10));
-        html.push_str(&format!("<td>{:.2}</td>", sample.read_length.median));
-        html.push_str(&format!("<td>{:.2}</td>", sample.read_length.mean));
+        html.push_str(&format!("<td>{:.0}</td>", sample.read_length.median));
+        html.push_str(&format!("<td>{:.0}</td>", sample.read_length.mean));
         html.push_str(&format!("<td>{}</td>", sample.read_length.p90));
         html.push_str(&format!("<td>{}</td>", sample.read_length.max));
         html.push_str(&format!("<td>{}</td>", sample.warnings.len()));
@@ -1101,20 +1104,20 @@ fn read_length_x_max_from_histograms<'a, I>(histograms: I) -> u32
 where
     I: IntoIterator<Item = &'a BTreeMap<u32, u64>>,
 {
-    let mut max_with_more_than_one = 0_u32;
+    let mut max_with_at_least_ten = 0_u32;
     let mut max_nonzero = 0_u32;
     for histogram in histograms {
         for (read_len, count) in histogram {
             if *count > 0 {
                 max_nonzero = max_nonzero.max(*read_len);
             }
-            if *count > 1 {
-                max_with_more_than_one = max_with_more_than_one.max(*read_len);
+            if *count >= 10 {
+                max_with_at_least_ten = max_with_at_least_ten.max(*read_len);
             }
         }
     }
-    if max_with_more_than_one > 0 {
-        max_with_more_than_one
+    if max_with_at_least_ten > 0 {
+        max_with_at_least_ten
     } else if max_nonzero > 0 {
         max_nonzero
     } else {
@@ -1352,12 +1355,12 @@ mod tests {
     }
 
     #[test]
-    fn read_length_x_max_uses_last_bin_with_more_than_one_read() {
+    fn read_length_x_max_uses_last_bin_with_at_least_ten_reads() {
         let mut hist_a = BTreeMap::new();
         hist_a.insert(900, 10);
-        hist_a.insert(1500, 1);
+        hist_a.insert(1500, 9);
         let mut hist_b = BTreeMap::new();
-        hist_b.insert(1200, 2);
+        hist_b.insert(1200, 12);
         hist_b.insert(2000, 1);
         let x_max = read_length_x_max_from_histograms([&hist_a, &hist_b]);
         assert_eq!(x_max, 1200);
