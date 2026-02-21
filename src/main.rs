@@ -16,10 +16,19 @@ use crate::{
 };
 
 fn main() {
+    init_logging();
+
     if let Err(err) = run() {
         eprintln!("error: {err:#}");
         std::process::exit(1);
     }
+}
+
+fn init_logging() {
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("blammo_qc=info"),
+    )
+    .try_init();
 }
 
 fn run() -> Result<()> {

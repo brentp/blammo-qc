@@ -400,6 +400,7 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
     let target_lengths: Vec<u64> = (0..target_names.len())
         .map(|tid| reader.header().target_len(tid as u32).unwrap_or(0))
         .collect();
+    let target_names_for_logging = target_names.clone();
     let sample_id = sample_id_from_header(reader.header(), &input.path);
     let mut depth_collector = DepthCollector::new(target_names, target_lengths, opts.depth_scope);
 
@@ -412,6 +413,8 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
     let mut read_length_acc = ReadLengthAccumulator::new();
     let mut depth_interval_buf: Vec<Interval> = Vec::new();
     let mut md_mismatch_offsets_buf: Vec<u32> = Vec::new();
+    let mut seen_contigs = vec![false; target_names_for_logging.len()];
+    let mut contig_logs_emitted = 0_usize;
 
     for record_result in reader.records() {
         let record = record_result.with_context(|| {
@@ -421,6 +424,25 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
             )
         })?;
         counts.total_records_seen += 1;
+
+        if contig_logs_emitted < 5 {
+            let tid = record.tid();
+            if tid >= 0 {
+                let tid = tid as usize;
+                if tid < seen_contigs.len() && !seen_contigs[tid] {
+                    seen_contigs[tid] = true;
+                    contig_logs_emitted += 1;
+                    if let Some(contig_name) = target_names_for_logging.get(tid) {
+                        log::info!(
+                            "Reached chromosome {} ({}/5); total reads processed: {}",
+                            contig_name,
+                            contig_logs_emitted,
+                            counts.total_records_seen
+                        );
+                    }
+                }
+            }
+        }
 
         let classification = classify_record(&record);
         if classification.is_unmapped {

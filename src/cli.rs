@@ -7,6 +7,7 @@ use clap::{Parser, ValueEnum};
 #[command(
     name = "blammo-qc",
     version,
+    before_help = concat!("blammo-qc ", env!("CARGO_PKG_VERSION")),
     about = "Compute BAM/CRAM QC metrics and generate JSON + Plotly HTML reports."
 )]
 pub struct Cli {
@@ -15,7 +16,7 @@ pub struct Cli {
     pub inputs: Vec<PathBuf>,
 
     /// Output JSON report path.
-    #[arg(long)]
+    #[arg(long, default_value = "qc.json")]
     pub output_json: PathBuf,
 
     /// Output HTML report path. Defaults to <output-json-stem>.html.
