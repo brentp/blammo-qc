@@ -7,16 +7,19 @@ use std::{
 
 use anyhow::{Context, Result};
 use plotly::{
-    common::{Mode, Visible},
-    layout::{
-        update_menu::{Button, ButtonMethod, UpdateMenu, UpdateMenuDirection, UpdateMenuType},
-        Axis, BarMode,
-    },
     Bar, Configuration, Layout, Plot, Scatter,
+    common::{Anchor, DashType, Font, Line, Marker, Mode, Orientation, Title, Visible},
+    configuration::{
+        DisplayModeBar, DoubleClick, ImageButtonFormats, ModeBarButtonName, ToImageButtonOptions,
+    },
+    layout::{
+        Axis, BarMode, DragMode, HoverMode, Legend, Margin, ModeBar, SpikeMode,
+        update_menu::{Button, ButtonMethod, UpdateMenu, UpdateMenuDirection, UpdateMenuType},
+    },
 };
 use serde_json::json;
 
-use crate::model::{QcReport, SampleQc, BQ_BIN_LABELS, DEPTH_HIST_BINS};
+use crate::model::{BQ_BIN_LABELS, DEPTH_HIST_BINS, QcReport, SampleQc};
 
 pub fn write_json_report(report: &QcReport, path: &Path) -> Result<()> {
     let filtered = filter_json_chromosomes(report);
@@ -63,6 +66,7 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
     plot.add_trace(
         Bar::new(sample_ids.clone(), soft_clip_values)
             .name("Soft-clipped bases")
+            .hover_template("Sample: %{x}<br>Soft-clipped bases: %{y}<extra></extra>")
             .visible(Visible::True),
     );
     trace_views.push(TraceView::SoftClips);
@@ -75,6 +79,7 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
     plot.add_trace(
         Bar::new(sample_ids.clone(), unmapped_values)
             .name("Unmapped reads")
+            .hover_template("Sample: %{x}<br>Unmapped reads: %{y}<extra></extra>")
             .visible(Visible::False),
     );
     trace_views.push(TraceView::Unmapped);
@@ -88,6 +93,9 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
         plot.add_trace(
             Scatter::new(x, y)
                 .mode(Mode::LinesMarkers)
+                .line(Line::new().width(2.0))
+                .marker(Marker::new().size(7))
+                .hover_template("BQ bin: %{x}<br>Mismatches: %{y}<extra></extra>")
                 .name(format!("{} mismatch BQ", sample.sample_id))
                 .visible(Visible::False),
         );
@@ -99,6 +107,8 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
         plot.add_trace(
             Scatter::new(x, y)
                 .mode(Mode::Lines)
+                .line(Line::new().width(2.0))
+                .hover_template("Read length: %{x}<br>Reads: %{y}<extra></extra>")
                 .name(format!("{} read length", sample.sample_id))
                 .visible(Visible::False),
         );
@@ -151,6 +161,8 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             plot.add_trace(
                 Scatter::new(x, y)
                     .mode(Mode::Lines)
+                    .line(Line::new().width(2.0))
+                    .hover_template("Depth: %{x}<br>Bases: %{y}<extra></extra>")
                     .name(label)
                     .visible(Visible::False),
             );
@@ -270,25 +282,107 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
     let metric_menu = UpdateMenu::new()
         .ty(UpdateMenuType::Dropdown)
         .buttons(metric_buttons)
+        .background_color("#FFFFFF")
+        .border_color("#CBD5E1")
+        .border_width(1)
+        .font(Font::new().size(12).color("#0F172A"))
         .active(0)
-        .x(0.0)
-        .y(1.20);
+        .x(0.01)
+        .y(1.22);
     let y_scale_menu = UpdateMenu::new()
         .ty(UpdateMenuType::Buttons)
         .direction(UpdateMenuDirection::Right)
         .buttons(y_scale_buttons)
+        .background_color("#FFFFFF")
+        .border_color("#CBD5E1")
+        .border_width(1)
+        .font(Font::new().size(12).color("#0F172A"))
         .active(0)
-        .x(0.55)
-        .y(1.20);
+        .x(0.62)
+        .y(1.22);
 
     let layout = Layout::new()
-        .title("Blammo QC report")
+        .title(
+            Title::with_text("Blammo QC Report").font(
+                Font::new()
+                    .family("IBM Plex Sans, Arial, sans-serif")
+                    .size(24)
+                    .color("#0F172A"),
+            ),
+        )
+        .height(760)
         .bar_mode(BarMode::Group)
-        .x_axis(Axis::new().title("Sample"))
-        .y_axis(Axis::new().title("Soft-clipped bases"))
+        .drag_mode(DragMode::Zoom)
+        .font(
+            Font::new()
+                .family("IBM Plex Sans, Arial, sans-serif")
+                .size(13)
+                .color("#0F172A"),
+        )
+        .paper_background_color("#F8FAFC")
+        .plot_background_color("#FFFFFF")
+        .colorway(vec![
+            "#0EA5E9", "#F97316", "#22C55E", "#A855F7", "#EF4444", "#14B8A6", "#F59E0B", "#3B82F6",
+        ])
+        .hover_mode(HoverMode::XUnified)
+        .margin(Margin::new().top(130).right(30).bottom(70).left(70))
+        .legend(
+            Legend::new()
+                .orientation(Orientation::Horizontal)
+                .x(0.0)
+                .x_anchor(Anchor::Left)
+                .y(1.10)
+                .y_anchor(Anchor::Bottom),
+        )
+        .mode_bar(
+            ModeBar::new()
+                .background_color("#FFFFFF")
+                .color("#334155")
+                .active_color("#0EA5E9"),
+        )
+        .x_axis(
+            Axis::new()
+                .title("Sample")
+                .auto_margin(true)
+                .line_color("#CBD5E1")
+                .grid_color("#E2E8F0")
+                .show_spikes(true)
+                .spike_mode(SpikeMode::Across)
+                .spike_color("#94A3B8")
+                .spike_dash(DashType::Dot)
+                .zero_line(false),
+        )
+        .y_axis(
+            Axis::new()
+                .title("Soft-clipped bases")
+                .auto_margin(true)
+                .line_color("#CBD5E1")
+                .grid_color("#E2E8F0")
+                .show_spikes(true)
+                .spike_mode(SpikeMode::Across)
+                .spike_color("#94A3B8")
+                .spike_dash(DashType::Dot)
+                .zero_line(false),
+        )
         .update_menus(vec![metric_menu, y_scale_menu]);
     plot.set_layout(layout);
-    plot.set_configuration(Configuration::new().responsive(true));
+    plot.set_configuration(
+        Configuration::new()
+            .responsive(true)
+            .scroll_zoom(true)
+            .display_logo(false)
+            .display_mode_bar(DisplayModeBar::True)
+            .double_click(DoubleClick::ResetAutoSize)
+            .mode_bar_buttons_to_remove(vec![ModeBarButtonName::SendDataToCloud])
+            .to_image_button_options(
+                ToImageButtonOptions::new()
+                    .format(ImageButtonFormats::Png)
+                    .filename("blammo-qc-report")
+                    .height(900)
+                    .width(1500)
+                    .scale(2),
+            ),
+    );
     plot.write_html(path);
     Ok(())
 }
@@ -471,7 +565,7 @@ fn canonicalize_json_chromosome(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonicalize_json_chromosome, depth_points, trace_is_visible, TraceView, ViewSelection,
+        TraceView, ViewSelection, canonicalize_json_chromosome, depth_points, trace_is_visible,
     };
 
     #[test]

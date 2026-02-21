@@ -6,16 +6,15 @@ use std::{
 
 use anyhow::{Context, Result};
 use rust_htslib::bam::{
-    self,
+    self, Read, Record,
     record::{Aux, Cigar},
-    Read, Record,
 };
 
 use crate::{
-    cli::{is_cram_path, DepthScope, SampleInput},
+    cli::{DepthScope, SampleInput, is_cram_path},
     model::{
-        base_quality_bin, DepthSummary, MismatchSummary, ReadCounts, ReadLengthSummary, SampleQc,
-        SoftClipSummary, BQ_BIN_LABELS, DEPTH_HIST_BINS, READ_LENGTH_HIST_BINS,
+        BQ_BIN_LABELS, DEPTH_HIST_BINS, DepthSummary, MismatchSummary, READ_LENGTH_HIST_BINS,
+        ReadCounts, ReadLengthSummary, SampleQc, SoftClipSummary, base_quality_bin,
     },
 };
 
@@ -120,6 +119,7 @@ struct DepthCollector {
     current_pos: u32,
     current_covered_bases: u64,
     current_histogram: Vec<u64>,
+    pending_starts: BinaryHeap<Reverse<(u32, u32)>>,
     active_ends: BinaryHeap<Reverse<u32>>,
 }
 
@@ -138,15 +138,42 @@ impl DepthCollector {
             current_pos: 0,
             current_covered_bases: 0,
             current_histogram: Vec::new(),
+            pending_starts: BinaryHeap::new(),
             active_ends: BinaryHeap::new(),
         }
     }
 
-    fn push_intervals(&mut self, tid: usize, intervals: &[Interval]) -> Result<()> {
+    fn observe_read_start(&mut self, tid: usize, read_start: u32) -> Result<()> {
         self.enter_tid(tid)?;
-        for interval in intervals {
-            self.push_interval(*interval)?;
+        if read_start < self.current_pos {
+            anyhow::bail!(
+                "depth streaming requires coordinate-sorted input within contig; saw read start {} after {}",
+                read_start,
+                self.current_pos
+            );
         }
+        self.advance_to(read_start);
+        Ok(())
+    }
+
+    fn enqueue_intervals(&mut self, intervals: &[Interval]) {
+        for interval in intervals {
+            if interval.end <= interval.start {
+                continue;
+            }
+            self.pending_starts
+                .push(Reverse((interval.start, interval.end)));
+        }
+    }
+
+    fn push_intervals(
+        &mut self,
+        tid: usize,
+        read_start: u32,
+        intervals: &[Interval],
+    ) -> Result<()> {
+        self.observe_read_start(tid, read_start)?;
+        self.enqueue_intervals(intervals);
         Ok(())
     }
 
@@ -214,33 +241,23 @@ impl DepthCollector {
         self.current_pos = 0;
         self.current_covered_bases = 0;
         self.current_histogram = vec![0_u64; DEPTH_HIST_BINS];
+        self.pending_starts.clear();
         self.active_ends.clear();
-    }
-
-    fn push_interval(&mut self, interval: Interval) -> Result<()> {
-        if interval.end <= interval.start {
-            return Ok(());
-        }
-        if interval.start < self.current_pos {
-            anyhow::bail!(
-                "depth streaming requires coordinate-sorted input within contig; saw start {} after {}",
-                interval.start,
-                self.current_pos
-            );
-        }
-        self.advance_to(interval.start);
-        self.active_ends.push(Reverse(interval.end));
-        Ok(())
     }
 
     fn advance_to(&mut self, target: u32) {
         while self.current_pos < target {
             self.pop_ended();
+            self.activate_starts();
             let next_boundary = self
                 .active_ends
                 .peek()
-                .map(|Reverse(end)| (*end).min(target))
-                .unwrap_or(target);
+                .map(|Reverse(end)| *end)
+                .into_iter()
+                .chain(self.pending_starts.peek().map(|Reverse((start, _))| *start))
+                .min()
+                .unwrap_or(target)
+                .min(target);
             if next_boundary <= self.current_pos {
                 break;
             }
@@ -265,20 +282,37 @@ impl DepthCollector {
         }
     }
 
-    fn drain_active_depth(&mut self) {
+    fn activate_starts(&mut self) {
+        while let Some(Reverse((start, _end))) = self.pending_starts.peek() {
+            if *start <= self.current_pos {
+                let (_, end) = self.pending_starts.pop().unwrap().0;
+                if end > self.current_pos {
+                    self.active_ends.push(Reverse(end));
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn drain_all_depth_events(&mut self) {
         loop {
             self.pop_ended();
-            let Some(next_end) = self.active_ends.peek().map(|Reverse(end)| *end) else {
+            self.activate_starts();
+            let next_end = self.active_ends.peek().map(|Reverse(end)| *end);
+            let next_start = self.pending_starts.peek().map(|Reverse((start, _))| *start);
+            let Some(next_boundary) = next_end.into_iter().chain(next_start).min() else {
                 break;
             };
-            if next_end <= self.current_pos {
+            if next_boundary <= self.current_pos {
                 continue;
             }
-            let span = (next_end - self.current_pos) as u64;
+            let span = (next_boundary - self.current_pos) as u64;
             self.add_span(self.active_ends.len(), span);
-            self.current_pos = next_end;
+            self.current_pos = next_boundary;
         }
         self.pop_ended();
+        self.activate_starts();
     }
 
     fn add_span(&mut self, depth: usize, span: u64) {
@@ -301,7 +335,7 @@ impl DepthCollector {
         let Some(tid) = self.current_tid.take() else {
             return;
         };
-        self.drain_active_depth();
+        self.drain_all_depth_events();
 
         let reference_bases = self.target_lengths.get(tid).copied().unwrap_or(0);
         if matches!(self.depth_scope, DepthScope::ReferenceBases) {
@@ -337,6 +371,7 @@ impl DepthCollector {
 
         self.current_pos = 0;
         self.current_covered_bases = 0;
+        self.pending_starts.clear();
         self.active_ends.clear();
     }
 }
@@ -376,6 +411,7 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
 
     let mut read_length_acc = ReadLengthAccumulator::new();
     let mut depth_interval_buf: Vec<Interval> = Vec::new();
+    let mut md_mismatch_offsets_buf: Vec<u32> = Vec::new();
 
     for record_result in reader.records() {
         let record = record_result.with_context(|| {
@@ -412,7 +448,7 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
         }
 
         match extract_md_string(&record) {
-            Some(md) => match mismatch_bins_from_md(&record, md) {
+            Some(md) => match mismatch_bins_from_md(&record, md, &mut md_mismatch_offsets_buf) {
                 Ok(md_bins) => {
                     for (i, count) in md_bins.by_bq.iter().enumerate() {
                         mismatch_bins.by_bq[i] += count;
@@ -436,9 +472,10 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
             continue;
         }
         let tid = tid as usize;
+        let read_start = record.pos() as u32;
         depth_intervals_from_record(&record, opts.min_base_quality, &mut depth_interval_buf);
         depth_collector
-            .push_intervals(tid, &depth_interval_buf)
+            .push_intervals(tid, read_start, &depth_interval_buf)
             .with_context(|| {
                 format!(
                     "failed depth streaming for {} (input must be coordinate-sorted)",
@@ -525,8 +562,12 @@ fn extract_md_string(record: &Record) -> Option<&str> {
     }
 }
 
-fn mismatch_bins_from_md(record: &Record, md: &str) -> Result<MismatchBins> {
-    let mismatch_offsets = parse_md_mismatch_offsets(md)?;
+fn mismatch_bins_from_md(
+    record: &Record,
+    md: &str,
+    mismatch_offsets: &mut Vec<u32>,
+) -> Result<MismatchBins> {
+    parse_md_mismatch_offsets(md, mismatch_offsets)?;
     let quals = record.qual();
 
     let mut bins = MismatchBins::default();
@@ -578,9 +619,9 @@ fn mismatch_bins_from_md(record: &Record, md: &str) -> Result<MismatchBins> {
     Ok(bins)
 }
 
-fn parse_md_mismatch_offsets(md: &str) -> Result<Vec<u32>> {
+fn parse_md_mismatch_offsets(md: &str, offsets: &mut Vec<u32>) -> Result<()> {
+    offsets.clear();
     let bytes = md.as_bytes();
-    let mut offsets = Vec::new();
     let mut i = 0_usize;
     let mut ref_offset = 0_u32;
 
@@ -624,7 +665,7 @@ fn parse_md_mismatch_offsets(md: &str) -> Result<Vec<u32>> {
         anyhow::bail!("unexpected character '{}' in MD tag", current as char);
     }
 
-    Ok(offsets)
+    Ok(())
 }
 
 fn depth_intervals_from_record(
@@ -779,12 +820,13 @@ fn build_warnings(counts: WarningCounters) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_record, parse_md_mismatch_offsets, DepthCollector, Interval};
+    use super::{DepthCollector, Interval, classify_record, parse_md_mismatch_offsets};
     use crate::cli::DepthScope;
 
     #[test]
     fn md_parser_handles_mismatches_and_deletions() {
-        let offsets = parse_md_mismatch_offsets("10A5^CC3T0G").unwrap();
+        let mut offsets = Vec::new();
+        parse_md_mismatch_offsets("10A5^CC3T0G", &mut offsets).unwrap();
         assert_eq!(offsets, vec![10, 21, 22]);
     }
 
@@ -798,6 +840,7 @@ mod tests {
         collector
             .push_intervals(
                 0,
+                10,
                 &[
                     Interval { start: 10, end: 20 },
                     Interval { start: 10, end: 20 },
@@ -818,18 +861,57 @@ mod tests {
             DepthScope::CoveredBases,
         );
         collector
-            .push_intervals(0, &[Interval { start: 10, end: 20 }])
+            .push_intervals(0, 10, &[Interval { start: 10, end: 20 }])
             .unwrap();
         collector
-            .push_intervals(1, &[Interval { start: 10, end: 20 }])
+            .push_intervals(1, 10, &[Interval { start: 10, end: 20 }])
             .unwrap();
         collector
-            .push_intervals(2, &[Interval { start: 10, end: 20 }])
+            .push_intervals(2, 10, &[Interval { start: 10, end: 20 }])
             .unwrap();
         let summary = collector.finish();
         assert_eq!(summary.per_chromosome_histograms.len(), 1);
         assert!(summary.per_chromosome_histograms.contains_key("chr1"));
         assert_eq!(summary.per_chromosome_histograms["chr1"][1], 20);
+    }
+
+    #[test]
+    fn depth_collector_handles_gapped_read_before_later_start_read() {
+        let mut collector = DepthCollector::new(
+            vec!["chr1".to_string()],
+            vec![1_000],
+            DepthScope::CoveredBases,
+        );
+        collector
+            .push_intervals(
+                0,
+                100,
+                &[
+                    Interval {
+                        start: 100,
+                        end: 110,
+                    },
+                    Interval {
+                        start: 120,
+                        end: 150,
+                    },
+                ],
+            )
+            .unwrap();
+        collector
+            .push_intervals(
+                0,
+                105,
+                &[Interval {
+                    start: 105,
+                    end: 115,
+                }],
+            )
+            .unwrap();
+        let summary = collector.finish();
+        assert_eq!(summary.covered_bases_total, 45);
+        assert_eq!(summary.genome_wide_histogram[1], 40);
+        assert_eq!(summary.genome_wide_histogram[2], 5);
     }
 
     #[test]

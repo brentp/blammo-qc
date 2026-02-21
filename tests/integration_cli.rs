@@ -125,6 +125,6 @@ fn cli_generates_expected_json_and_html_for_fixture_bam() {
     );
 
     let html = fs::read_to_string(&html_path).expect("read HTML report");
-    assert!(html.contains("Blammo QC report"));
+    assert!(html.contains("Blammo QC Report"));
     assert!(html.contains("plotly"));
 }
