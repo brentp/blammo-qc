@@ -24,7 +24,7 @@ pub struct ProcessingOptions<'a> {
     pub min_base_quality: u8,
     pub min_mapping_quality: u8,
     pub depth_scope: DepthScope,
-    pub tag_bars: &'a [String],
+    pub tag_metrics: &'a [String],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -419,13 +419,13 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
     let mut mismatch_summary = MismatchSummary::default();
     let mut mismatch_bins = MismatchBins::default();
     let mut warning_counts = WarningCounters::default();
-    let requested_tag_bars: Vec<RequestedTagBar<'_>> = opts
-        .tag_bars
+    let requested_tag_metrics: Vec<RequestedTagMetric<'_>> = opts
+        .tag_metrics
         .iter()
-        .filter_map(|tag| RequestedTagBar::new(tag))
+        .filter_map(|tag| RequestedTagMetric::new(tag))
         .collect();
     let mut tag_value_counts: BTreeMap<String, BTreeMap<i64, u64>> = opts
-        .tag_bars
+        .tag_metrics
         .iter()
         .map(|tag| (tag.clone(), BTreeMap::new()))
         .collect();
@@ -512,7 +512,7 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
         if record.mapq() < opts.min_mapping_quality {
             continue;
         }
-        update_tag_value_counts(&record, &requested_tag_bars, &mut tag_value_counts);
+        update_tag_value_counts(&record, &requested_tag_metrics, &mut tag_value_counts);
         let tid = record.tid();
         if tid < 0 {
             continue;
@@ -554,12 +554,12 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
 }
 
 #[derive(Debug, Clone, Copy)]
-struct RequestedTagBar<'a> {
+struct RequestedTagMetric<'a> {
     name: &'a str,
     bytes: [u8; 2],
 }
 
-impl<'a> RequestedTagBar<'a> {
+impl<'a> RequestedTagMetric<'a> {
     fn new(name: &'a str) -> Option<Self> {
         let bytes = name.as_bytes();
         if bytes.len() != 2 {
@@ -630,7 +630,7 @@ fn update_soft_clip_metrics(record: &Record, soft_clips: &mut SoftClipSummary) {
 
 fn update_tag_value_counts(
     record: &Record,
-    requested_tags: &[RequestedTagBar<'_>],
+    requested_tags: &[RequestedTagMetric<'_>],
     tag_value_counts: &mut BTreeMap<String, BTreeMap<i64, u64>>,
 ) {
     for requested_tag in requested_tags {

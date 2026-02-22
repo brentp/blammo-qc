@@ -40,6 +40,7 @@ enum MetricTraceView {
     MismatchByBaseQuality,
     ReadLength,
     TagBar(String),
+    TagLine(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,7 @@ enum MetricSelection {
     MismatchByBaseQuality,
     ReadLength,
     TagBar(String),
+    TagLine(String),
 }
 
 pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize) -> Result<()> {
@@ -451,6 +453,53 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             None,
         ));
     }
+    for tag in &report.settings.tag_lines {
+        let mut tag_values = BTreeSet::new();
+        for sample in &report.samples {
+            if let Some(counts) = sample.tag_value_counts.get(tag) {
+                tag_values.extend(counts.keys().copied());
+            }
+        }
+        let tag_values: Vec<i64> = tag_values.into_iter().collect();
+        for sample in &report.samples {
+            let y_values: Vec<u64> = tag_values
+                .iter()
+                .map(|value| {
+                    sample
+                        .tag_value_counts
+                        .get(tag)
+                        .and_then(|counts| counts.get(value).copied())
+                        .unwrap_or(0)
+                })
+                .collect();
+            metrics_plot.add_trace(
+                Scatter::new(tag_values.clone(), y_values)
+                    .mode(Mode::LinesMarkers)
+                    .line(Line::new().width(2.0))
+                    .marker(Marker::new().size(7))
+                    .hover_template(format!(
+                        "Sample: {}<br>{tag} value: %{{x}}<br>Reads: %{{y}}<extra></extra>",
+                        sample.sample_id
+                    ))
+                    .name(sample.sample_id.clone())
+                    .visible(Visible::False),
+            );
+            metric_trace_views.push(MetricTraceView::TagLine(tag.clone()));
+        }
+        tag_metric_options.push((
+            format!("{tag} tag values (line)"),
+            MetricSelection::TagLine(tag.clone()),
+            format!("{tag} tag integer values by sample (line)"),
+            format!("{tag} value"),
+            "Reads".to_string(),
+            "linear".to_string(),
+            json!(null),
+            false,
+            false,
+            false,
+            None,
+        ));
+    }
 
     let mut metric_options = vec![
         (
@@ -723,6 +772,9 @@ fn metric_trace_is_visible(trace_view: &MetricTraceView, selection: &MetricSelec
         (MetricTraceView::MismatchByBaseQuality, MetricSelection::MismatchByBaseQuality) => true,
         (MetricTraceView::ReadLength, MetricSelection::ReadLength) => true,
         (MetricTraceView::TagBar(trace_tag), MetricSelection::TagBar(selected_tag)) => {
+            trace_tag == selected_tag
+        }
+        (MetricTraceView::TagLine(trace_tag), MetricSelection::TagLine(selected_tag)) => {
             trace_tag == selected_tag
         }
         _ => false,
@@ -1390,6 +1442,14 @@ mod tests {
         assert!(!metric_trace_is_visible(
             &MetricTraceView::TagBar("NM".to_string()),
             &MetricSelection::TagBar("AS".to_string())
+        ));
+        assert!(metric_trace_is_visible(
+            &MetricTraceView::TagLine("NM".to_string()),
+            &MetricSelection::TagLine("NM".to_string())
+        ));
+        assert!(!metric_trace_is_visible(
+            &MetricTraceView::TagLine("NM".to_string()),
+            &MetricSelection::TagLine("AS".to_string())
         ));
     }
 

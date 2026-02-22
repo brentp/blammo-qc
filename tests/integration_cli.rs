@@ -186,6 +186,50 @@ fn cli_tag_bar_counts_integer_values_and_adds_metric_views() {
 }
 
 #[test]
+fn cli_tag_line_counts_integer_values_and_adds_line_metric_views() {
+    let tmp = tempdir().expect("create temp dir");
+    let bam_path = tmp.path().join("fixture.bam");
+    let json_path = tmp.path().join("report.json");
+    let html_path = tmp.path().join("report.html");
+    write_fixture_bam(&bam_path);
+
+    let bin = resolve_binary_path();
+    let output = Command::new(&bin)
+        .args([
+            "--output-json",
+            &json_path.to_string_lossy(),
+            "--output-html",
+            &html_path.to_string_lossy(),
+            "--threads",
+            "1",
+            "--tag-line",
+            "ZX",
+            &bam_path.to_string_lossy(),
+        ])
+        .output()
+        .expect("run blammo-qc");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json_text = fs::read_to_string(&json_path).expect("read JSON report");
+    let json: serde_json::Value = serde_json::from_str(&json_text).expect("parse JSON report");
+
+    assert_eq!(json["settings"]["tag_lines"], json!(["ZX"]));
+    let sample = &json["samples"][0];
+    assert_eq!(sample["tag_value_counts"]["ZX"]["7"], 2);
+    assert!(sample["tag_value_counts"]["ZX"]["9"].is_null());
+
+    let html = fs::read_to_string(&html_path).expect("read HTML report");
+    assert!(html.contains("ZX tag values (line)"));
+    assert!(html.contains("ZX tag integer values by sample (line)"));
+}
+
+#[test]
 fn cli_skips_json_output_when_flag_not_provided() {
     let tmp = tempdir().expect("create temp dir");
     let bam_path = tmp.path().join("fixture.bam");

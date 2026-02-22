@@ -24,6 +24,7 @@ pub struct RunSettings {
     pub depth_scope: String,
     pub plot_max_contigs: usize,
     pub tag_bars: Vec<String>,
+    pub tag_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

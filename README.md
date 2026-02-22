@@ -9,8 +9,8 @@
 ```bash
 blammo-qc \
   --reference ref.fa \
-  --tag-bar NM \
-  --tag-bar AS \
+  --tag-bar np \ # (make a bar plot grouped-by sample of the `np` integer tag)
+  --tag-line ZX \ # (make a line plot for each sample of the `ZX` tag)
   --output-html blammo.cohort.html \
   sample1.bam sample2.cram 
 ```

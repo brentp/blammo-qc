@@ -3,6 +3,8 @@ mod metrics;
 mod model;
 mod report;
 
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
@@ -40,12 +42,13 @@ fn run() -> Result<()> {
         .build()
         .context("failed to build rayon thread pool")?;
 
+    let tag_metrics = merge_unique_tags(&config.tag_bars, &config.tag_lines);
     let processing_opts = ProcessingOptions {
         reference: config.reference.as_deref(),
         min_base_quality: config.min_base_quality,
         min_mapping_quality: config.min_mapping_quality,
         depth_scope: config.depth_scope,
-        tag_bars: &config.tag_bars,
+        tag_metrics: &tag_metrics,
     };
 
     let sample_results = worker_pool.install(|| {
@@ -74,6 +77,7 @@ fn run() -> Result<()> {
             depth_scope: config.depth_scope.as_str().to_string(),
             plot_max_contigs: config.plot_max_contigs,
             tag_bars: config.tag_bars.clone(),
+            tag_lines: config.tag_lines.clone(),
         },
         samples,
     };
@@ -83,4 +87,15 @@ fn run() -> Result<()> {
     }
     write_html_report(&report, &config.output_html, config.plot_max_contigs)?;
     Ok(())
+}
+
+fn merge_unique_tags(primary: &[String], secondary: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut merged = Vec::new();
+    for tag in primary.iter().chain(secondary.iter()) {
+        if seen.insert(tag.clone()) {
+            merged.push(tag.clone());
+        }
+    }
+    merged
 }
