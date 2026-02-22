@@ -9,6 +9,10 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-static-linux:
     name: Linux static (${{ matrix.target }})
@@ -30,6 +34,12 @@ jobs:
 
       - name: Install cross
         uses: taiki-e/install-action@cross
+
+      - name: Cache Rust deps/build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build static binary
         run: cross build --locked --release --target ${{ matrix.target }}
@@ -72,6 +82,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Cache Rust deps/build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build macOS binary
         run: cargo build --release --target ${{ matrix.target }}
