@@ -39,6 +39,7 @@ enum MetricTraceView {
     Unmapped,
     MismatchByBaseQuality,
     ReadLength,
+    TagBar(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,7 @@ enum MetricSelection {
     Unmapped,
     MismatchByBaseQuality,
     ReadLength,
+    TagBar(String),
 }
 
 pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize) -> Result<()> {
@@ -391,8 +393,66 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             .iter()
             .map(|sample| &sample.read_length.histogram),
     ) as f64;
+    let mut tag_metric_options: Vec<(
+        String,
+        MetricSelection,
+        String,
+        String,
+        String,
+        String,
+        serde_json::Value,
+        bool,
+        bool,
+        bool,
+        Option<f64>,
+    )> = Vec::new();
+    for tag in &report.settings.tag_bars {
+        let mut tag_values = BTreeSet::new();
+        for sample in &report.samples {
+            if let Some(counts) = sample.tag_value_counts.get(tag) {
+                tag_values.extend(counts.keys().copied());
+            }
+        }
+        let tag_values: Vec<i64> = tag_values.into_iter().collect();
+        let x_values: Vec<String> = tag_values.iter().map(|value| value.to_string()).collect();
+        for sample in &report.samples {
+            let y_values: Vec<u64> = tag_values
+                .iter()
+                .map(|value| {
+                    sample
+                        .tag_value_counts
+                        .get(tag)
+                        .and_then(|counts| counts.get(value).copied())
+                        .unwrap_or(0)
+                })
+                .collect();
+            metrics_plot.add_trace(
+                Bar::new(x_values.clone(), y_values)
+                    .name(sample.sample_id.clone())
+                    .hover_template(format!(
+                        "Sample: {}<br>{tag} value: %{{x}}<br>Reads: %{{y}}<extra></extra>",
+                        sample.sample_id
+                    ))
+                    .visible(Visible::False),
+            );
+            metric_trace_views.push(MetricTraceView::TagBar(tag.clone()));
+        }
+        tag_metric_options.push((
+            format!("{tag} tag values"),
+            MetricSelection::TagBar(tag.clone()),
+            format!("{tag} tag integer values by sample"),
+            format!("{tag} value"),
+            "Reads".to_string(),
+            "category".to_string(),
+            json!(x_values),
+            true,
+            true,
+            false,
+            None,
+        ));
+    }
 
-    let metric_options = vec![
+    let mut metric_options = vec![
         (
             "Mapped reads".to_string(),
             MetricSelection::MappedReads,
@@ -459,6 +519,7 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             Some(read_length_x_max),
         ),
     ];
+    metric_options.extend(tag_metric_options);
     let metric_buttons: Vec<Button> = metric_options
         .iter()
         .map(
@@ -661,6 +722,9 @@ fn metric_trace_is_visible(trace_view: &MetricTraceView, selection: &MetricSelec
         (MetricTraceView::Unmapped, MetricSelection::Unmapped) => true,
         (MetricTraceView::MismatchByBaseQuality, MetricSelection::MismatchByBaseQuality) => true,
         (MetricTraceView::ReadLength, MetricSelection::ReadLength) => true,
+        (MetricTraceView::TagBar(trace_tag), MetricSelection::TagBar(selected_tag)) => {
+            trace_tag == selected_tag
+        }
         _ => false,
     }
 }
@@ -1262,6 +1326,7 @@ fn filter_json_chromosomes(report: &QcReport) -> QcReport {
                 covered_bases_total: sample.depth_distribution.covered_bases_total,
                 zero_depth_bases_total: sample.depth_distribution.zero_depth_bases_total,
             },
+            tag_value_counts: sample.tag_value_counts.clone(),
             warnings: sample.warnings.clone(),
         });
     }
@@ -1317,6 +1382,14 @@ mod tests {
         assert!(metric_trace_is_visible(
             &MetricTraceView::ReadLength,
             &MetricSelection::ReadLength
+        ));
+        assert!(metric_trace_is_visible(
+            &MetricTraceView::TagBar("NM".to_string()),
+            &MetricSelection::TagBar("NM".to_string())
+        ));
+        assert!(!metric_trace_is_visible(
+            &MetricTraceView::TagBar("NM".to_string()),
+            &MetricSelection::TagBar("AS".to_string())
         ));
     }
 

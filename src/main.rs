@@ -45,6 +45,7 @@ fn run() -> Result<()> {
         min_base_quality: config.min_base_quality,
         min_mapping_quality: config.min_mapping_quality,
         depth_scope: config.depth_scope,
+        tag_bars: &config.tag_bars,
     };
 
     let sample_results = worker_pool.install(|| {
@@ -72,6 +73,7 @@ fn run() -> Result<()> {
                 .map(|path| path.to_string_lossy().to_string()),
             depth_scope: config.depth_scope.as_str().to_string(),
             plot_max_contigs: config.plot_max_contigs,
+            tag_bars: config.tag_bars.clone(),
         },
         samples,
     };

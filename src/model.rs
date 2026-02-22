@@ -23,6 +23,7 @@ pub struct RunSettings {
     pub reference: Option<String>,
     pub depth_scope: String,
     pub plot_max_contigs: usize,
+    pub tag_bars: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +35,7 @@ pub struct SampleQc {
     pub mismatches: MismatchSummary,
     pub read_length: ReadLengthSummary,
     pub depth_distribution: DepthSummary,
+    pub tag_value_counts: BTreeMap<String, BTreeMap<i64, u64>>,
     pub warnings: Vec<String>,
 }
 

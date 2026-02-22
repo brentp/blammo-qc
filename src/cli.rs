@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
@@ -46,6 +49,10 @@ pub struct Cli {
     /// Maximum number of per-contig depth views in HTML (remaining contigs are grouped as "Other").
     #[arg(long, default_value_t = 25)]
     pub plot_max_contigs: usize,
+
+    /// SAM tags (two characters) whose integer values should be counted and shown as grouped bars.
+    #[arg(long = "tag-bar", value_name = "TAG")]
+    pub tag_bar: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -79,10 +86,12 @@ pub struct Config {
     pub threads: usize,
     pub depth_scope: DepthScope,
     pub plot_max_contigs: usize,
+    pub tag_bars: Vec<String>,
 }
 
 impl Cli {
     pub fn into_config(self) -> Result<Config> {
+        let tag_bars = normalize_tag_bars(&self.tag_bar)?;
         let has_cram = self.inputs.iter().any(|path| is_cram_path(path));
         if has_cram && self.reference.is_none() {
             bail!("CRAM input detected; provide --reference <FASTA>");
@@ -138,6 +147,7 @@ impl Cli {
             threads,
             depth_scope: self.depth_scope,
             plot_max_contigs: self.plot_max_contigs,
+            tag_bars,
         })
     }
 }
@@ -148,13 +158,53 @@ pub fn is_cram_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn normalize_tag_bars(tag_bars: &[String]) -> Result<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for tag in tag_bars {
+        if !is_valid_sam_tag(tag) {
+            bail!(
+                "invalid --tag-bar value `{}`; expected a two-character SAM tag (e.g. NM)",
+                tag
+            );
+        }
+        if seen.insert(tag.clone()) {
+            normalized.push(tag.clone());
+        }
+    }
+    Ok(normalized)
+}
+
+fn is_valid_sam_tag(tag: &str) -> bool {
+    let bytes = tag.as_bytes();
+    bytes.len() == 2 && bytes[0].is_ascii_alphanumeric() && bytes[1].is_ascii_alphanumeric()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+
+    use super::{is_valid_sam_tag, normalize_tag_bars};
 
     #[test]
     fn default_html_path_is_blammo_html() {
         let path = PathBuf::from("blammo.html");
         assert_eq!(path.to_string_lossy(), "blammo.html");
+    }
+
+    #[test]
+    fn tag_bar_validation_requires_two_ascii_alnum_characters() {
+        assert!(is_valid_sam_tag("NM"));
+        assert!(is_valid_sam_tag("X1"));
+        assert!(!is_valid_sam_tag("N"));
+        assert!(!is_valid_sam_tag("NM3"));
+        assert!(!is_valid_sam_tag("N_"));
+    }
+
+    #[test]
+    fn tag_bar_normalization_deduplicates_in_order() {
+        let normalized =
+            normalize_tag_bars(&["NM".to_string(), "AS".to_string(), "NM".to_string()]).unwrap();
+        assert_eq!(normalized, vec!["NM".to_string(), "AS".to_string()]);
     }
 }

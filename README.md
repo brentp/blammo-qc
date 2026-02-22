@@ -9,6 +9,8 @@
 ```bash
 blammo-qc \
   --reference ref.fa \
+  --tag-bar NM \
+  --tag-bar AS \
   --output-html blammo.cohort.html \
   sample1.bam sample2.cram 
 ```

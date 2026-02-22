@@ -24,6 +24,7 @@ pub struct ProcessingOptions<'a> {
     pub min_base_quality: u8,
     pub min_mapping_quality: u8,
     pub depth_scope: DepthScope,
+    pub tag_bars: &'a [String],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -418,6 +419,16 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
     let mut mismatch_summary = MismatchSummary::default();
     let mut mismatch_bins = MismatchBins::default();
     let mut warning_counts = WarningCounters::default();
+    let requested_tag_bars: Vec<RequestedTagBar<'_>> = opts
+        .tag_bars
+        .iter()
+        .filter_map(|tag| RequestedTagBar::new(tag))
+        .collect();
+    let mut tag_value_counts: BTreeMap<String, BTreeMap<i64, u64>> = opts
+        .tag_bars
+        .iter()
+        .map(|tag| (tag.clone(), BTreeMap::new()))
+        .collect();
 
     let mut read_length_acc = ReadLengthAccumulator::new();
     let mut depth_interval_buf: Vec<Interval> = Vec::new();
@@ -501,6 +512,7 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
         if record.mapq() < opts.min_mapping_quality {
             continue;
         }
+        update_tag_value_counts(&record, &requested_tag_bars, &mut tag_value_counts);
         let tid = record.tid();
         if tid < 0 {
             continue;
@@ -536,8 +548,28 @@ pub fn process_sample(input: &SampleInput, opts: &ProcessingOptions<'_>) -> Resu
         mismatches: mismatch_summary,
         read_length,
         depth_distribution,
+        tag_value_counts,
         warnings,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RequestedTagBar<'a> {
+    name: &'a str,
+    bytes: [u8; 2],
+}
+
+impl<'a> RequestedTagBar<'a> {
+    fn new(name: &'a str) -> Option<Self> {
+        let bytes = name.as_bytes();
+        if bytes.len() != 2 {
+            return None;
+        }
+        Some(Self {
+            name,
+            bytes: [bytes[0], bytes[1]],
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -596,6 +628,21 @@ fn update_soft_clip_metrics(record: &Record, soft_clips: &mut SoftClipSummary) {
     }
 }
 
+fn update_tag_value_counts(
+    record: &Record,
+    requested_tags: &[RequestedTagBar<'_>],
+    tag_value_counts: &mut BTreeMap<String, BTreeMap<i64, u64>>,
+) {
+    for requested_tag in requested_tags {
+        let Some(value) = extract_integer_aux_value(record, &requested_tag.bytes) else {
+            continue;
+        };
+        if let Some(tag_counts) = tag_value_counts.get_mut(requested_tag.name) {
+            *tag_counts.entry(value).or_insert(0) += 1;
+        }
+    }
+}
+
 fn extract_nm_value(record: &Record) -> Option<u32> {
     match record.aux(b"NM").ok()? {
         Aux::I8(v) if v >= 0 => Some(v as u32),
@@ -604,6 +651,18 @@ fn extract_nm_value(record: &Record) -> Option<u32> {
         Aux::U16(v) => Some(v as u32),
         Aux::I32(v) if v >= 0 => Some(v as u32),
         Aux::U32(v) => Some(v),
+        _ => None,
+    }
+}
+
+fn extract_integer_aux_value(record: &Record, tag: &[u8; 2]) -> Option<i64> {
+    match record.aux(tag).ok()? {
+        Aux::I8(v) => Some(v as i64),
+        Aux::U8(v) => Some(v as i64),
+        Aux::I16(v) => Some(v as i64),
+        Aux::U16(v) => Some(v as i64),
+        Aux::I32(v) => Some(v as i64),
+        Aux::U32(v) => Some(v as i64),
         _ => None,
     }
 }
