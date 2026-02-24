@@ -1057,9 +1057,9 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
     html.push_str("<th>Total reads seen</th>");
     html.push_str("<th>Mapped reads</th>");
     html.push_str("<th>Unmapped reads</th>");
-    html.push_str("<th>Soft-clipped bases</th>");
+    html.push_str("<th>Soft-clipped bases / 1M bases</th>");
     html.push_str("<th>Reads with soft clips</th>");
-    html.push_str("<th>NM sum</th>");
+    html.push_str("<th>NM / 1M bases</th>");
     html.push_str("<th>Read length min</th>");
     html.push_str("<th>Read length p10</th>");
     html.push_str("<th>Read length median</th>");
@@ -1080,6 +1080,8 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
         let mode_depth =
             depth_mode_from_histogram(&sample.depth_distribution.genome_wide_histogram);
         let total_reads = sample.counts.total_records_seen;
+        let mapped_read_bases =
+            sample.read_length.mean * sample.counts.primary_mapped_reads_used as f64;
         html.push_str("<tr>");
         html.push_str(&format!("<td>{}</td>", escape_html(&sample.sample_id)));
         html.push_str(&format!("<td>{}</td>", median_depth));
@@ -1095,7 +1097,7 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
         ));
         html.push_str(&format!(
             "<td>{}</td>",
-            sample.soft_clips.total_soft_clipped_bases
+            format_per_million_bases(sample.soft_clips.total_soft_clipped_bases, mapped_read_bases)
         ));
         html.push_str(&format!(
             "<td>{}</td>",
@@ -1104,7 +1106,10 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
                 sample.counts.primary_mapped_reads_used
             )
         ));
-        html.push_str(&format!("<td>{}</td>", sample.mismatches.nm_sum));
+        html.push_str(&format!(
+            "<td>{}</td>",
+            format_per_million_bases(sample.mismatches.nm_sum, mapped_read_bases)
+        ));
         html.push_str(&format!("<td>{}</td>", sample.read_length.min));
         html.push_str(&format!("<td>{}</td>", sample.read_length.p10));
         html.push_str(&format!("<td>{:.0}</td>", sample.read_length.median));
@@ -1146,6 +1151,14 @@ fn format_count_with_percent(count: u64, total: u64) -> String {
         (count as f64 * 100.0) / total as f64
     };
     format!("{count} ({percent:.2}%)")
+}
+
+fn format_per_million_bases(count: u64, total_bases: f64) -> String {
+    if total_bases <= 0.0 {
+        return "0.00".to_string();
+    }
+    let per_million = (count as f64 * 1_000_000.0) / total_bases;
+    format!("{per_million:.2}")
 }
 
 fn depth_median_from_histogram(hist: &[u64]) -> u32 {
@@ -1417,7 +1430,8 @@ mod tests {
     use super::{
         MetricSelection, MetricTraceView, canonicalize_json_chromosome,
         depth_median_from_histogram, depth_mode_from_histogram, depth_points,
-        depth_x_max_from_histogram, format_count_with_percent, metric_trace_is_visible,
+        depth_x_max_from_histogram, format_count_with_percent, format_per_million_bases,
+        metric_trace_is_visible,
         read_length_points, read_length_x_max_from_histograms, sort_depth_chromosomes,
     };
 
@@ -1503,6 +1517,13 @@ mod tests {
     fn format_count_with_percent_uses_total_reads() {
         assert_eq!(format_count_with_percent(9923, 10_000), "9923 (99.23%)");
         assert_eq!(format_count_with_percent(0, 0), "0 (0.00%)");
+    }
+
+    #[test]
+    fn format_per_million_bases_uses_total_bases() {
+        assert_eq!(format_per_million_bases(125, 1_000_000.0), "125.00");
+        assert_eq!(format_per_million_bases(1, 10.0), "100000.00");
+        assert_eq!(format_per_million_bases(5, 0.0), "0.00");
     }
 
     #[test]
