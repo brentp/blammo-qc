@@ -798,6 +798,18 @@ fn compose_two_plot_html(report: &QcReport, depth_plot: &Plot, metrics_plot: &Pl
     } else {
         "Covered bases only"
     };
+    let table_sort_assets = r#"
+    <script src="https://cdn.jsdelivr.net/npm/tablesort@5.7.0/dist/tablesort.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tablesort@5.7.0/dist/sorts/tablesort.number.min.js"></script>
+    <script>
+    document.addEventListener("DOMContentLoaded", function () {
+        const table = document.querySelector(".metrics-table");
+        if (table) {
+            new Tablesort(table);
+        }
+    });
+    </script>
+    "#;
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -949,6 +961,27 @@ fn compose_two_plot_html(report: &QcReport, depth_plot: &Plot, metrics_plot: &Pl
             background: #eef2f7;
             font-weight: 600;
             color: #1e293b;
+            cursor: pointer;
+            user-select: none;
+        }}
+        .metrics-table th.sort-up,
+        .metrics-table th.sort-down {{
+            background: #dbeafe;
+        }}
+        .metrics-table th.sort-header::after {{
+            content: " <> ";
+            color: #94a3b8;
+            font-size: 11px;
+        }}
+        .metrics-table th.sort-up::after {{
+            content: " ^ ";
+            color: #1d4ed8;
+            font-size: 11px;
+        }}
+        .metrics-table th.sort-down::after {{
+            content: " v ";
+            color: #1d4ed8;
+            font-size: 11px;
         }}
         .metrics-table th:first-child,
         .metrics-table td:first-child {{
@@ -1030,6 +1063,7 @@ fn compose_two_plot_html(report: &QcReport, depth_plot: &Plot, metrics_plot: &Pl
             </div>
         </section>
     </main>
+    {table_sort_assets}
 </body>
 </html>
 "#
@@ -1097,7 +1131,10 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
         ));
         html.push_str(&format!(
             "<td>{}</td>",
-            format_per_million_bases(sample.soft_clips.total_soft_clipped_bases, mapped_read_bases)
+            format_per_million_bases(
+                sample.soft_clips.total_soft_clipped_bases,
+                mapped_read_bases
+            )
         ));
         html.push_str(&format!(
             "<td>{}</td>",
@@ -1218,9 +1255,10 @@ fn chromosome_sort_key(name: &str) -> (u8, u16, String) {
 fn read_length_points(hist: &std::collections::BTreeMap<u32, u64>) -> (Vec<u32>, Vec<f64>) {
     let mut x = Vec::with_capacity(hist.len());
     let mut y = Vec::with_capacity(hist.len());
+    let has_wide_bins = hist.keys().any(|read_len| *read_len > 1_000);
     for (read_len, count) in hist {
         x.push(*read_len);
-        if *read_len > 1_000 {
+        if *read_len > 1_000 || (has_wide_bins && *read_len == 1_000) {
             y.push(*count as f64 / 50.0);
         } else {
             y.push(*count as f64);
@@ -1431,8 +1469,8 @@ mod tests {
         MetricSelection, MetricTraceView, canonicalize_json_chromosome,
         depth_median_from_histogram, depth_mode_from_histogram, depth_points,
         depth_x_max_from_histogram, format_count_with_percent, format_per_million_bases,
-        metric_trace_is_visible,
-        read_length_points, read_length_x_max_from_histograms, sort_depth_chromosomes,
+        metric_trace_is_visible, read_length_points, read_length_x_max_from_histograms,
+        sort_depth_chromosomes,
     };
 
     #[test]
@@ -1498,7 +1536,17 @@ mod tests {
         hist.insert(1050, 100);
         let (x, y) = read_length_points(&hist);
         assert_eq!(x, vec![999, 1000, 1050]);
-        assert_eq!(y, vec![20.0, 10.0, 2.0]);
+        assert_eq!(y, vec![20.0, 0.2, 2.0]);
+    }
+
+    #[test]
+    fn read_length_points_keep_1000_unscaled_when_no_wide_bins() {
+        let mut hist = BTreeMap::new();
+        hist.insert(950, 7);
+        hist.insert(1000, 10);
+        let (x, y) = read_length_points(&hist);
+        assert_eq!(x, vec![950, 1000]);
+        assert_eq!(y, vec![7.0, 10.0]);
     }
 
     #[test]
