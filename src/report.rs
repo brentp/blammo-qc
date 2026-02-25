@@ -36,6 +36,9 @@ pub fn write_json_report(report: &QcReport, path: &Path) -> Result<()> {
 enum MetricTraceView {
     MappedReads,
     SoftClips,
+    SoftClipsPerMillion,
+    NmPerMillion,
+    SoftClipReadPercent,
     Unmapped,
     MismatchByBaseQuality,
     ReadLength,
@@ -47,6 +50,9 @@ enum MetricTraceView {
 enum MetricSelection {
     MappedReads,
     SoftClips,
+    SoftClipsPerMillion,
+    NmPerMillion,
+    SoftClipReadPercent,
     Unmapped,
     MismatchByBaseQuality,
     ReadLength,
@@ -108,17 +114,20 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             }
             let (x, y) = depth_points(histogram);
             let label = if chromosome == "__genome__" {
-                format!("{} depth (genome)", sample.sample_id)
+                format!("{} (genome)", sample.sample_id)
             } else if chromosome == "__other__" {
-                format!("{} depth (other contigs)", sample.sample_id)
+                format!("{} (other contigs)", sample.sample_id)
             } else {
-                format!("{} depth ({chromosome})", sample.sample_id)
+                format!("{} ({chromosome})", sample.sample_id)
             };
             depth_plot.add_trace(
                 Scatter::new(x, y)
                     .mode(Mode::Lines)
                     .line(Line::new().width(2.0))
-                    .hover_template("Depth: %{x}<br>Bases: %{y}<extra></extra>")
+                    .hover_template(format!(
+                        "Depth: %{{x}} | Sample: {}",
+                        escape_html(&sample.sample_id)
+                    ))
                     .name(label)
                     .visible(if chromosome == "__genome__" {
                         Visible::True
@@ -346,6 +355,70 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
     );
     metric_trace_views.push(MetricTraceView::SoftClips);
 
+    let soft_clip_per_million_values: Vec<f64> = report
+        .samples
+        .iter()
+        .map(|sample| {
+            let mapped_read_bases =
+                sample.read_length.mean * sample.counts.primary_mapped_reads_used as f64;
+            if mapped_read_bases <= 0.0 {
+                0.0
+            } else {
+                sample.soft_clips.total_soft_clipped_bases as f64 * 1_000_000.0 / mapped_read_bases
+            }
+        })
+        .collect();
+    metrics_plot.add_trace(
+        Bar::new(sample_ids.clone(), soft_clip_per_million_values)
+            .name("Soft-clipped bases / 1M")
+            .hover_template(
+                "Sample: %{x}<br>Soft-clipped bases / 1M bases: %{y:.2f}<extra></extra>",
+            )
+            .visible(Visible::False),
+    );
+    metric_trace_views.push(MetricTraceView::SoftClipsPerMillion);
+
+    let nm_per_million_values: Vec<f64> = report
+        .samples
+        .iter()
+        .map(|sample| {
+            let mapped_read_bases =
+                sample.read_length.mean * sample.counts.primary_mapped_reads_used as f64;
+            if mapped_read_bases <= 0.0 {
+                0.0
+            } else {
+                sample.mismatches.nm_sum as f64 * 1_000_000.0 / mapped_read_bases
+            }
+        })
+        .collect();
+    metrics_plot.add_trace(
+        Bar::new(sample_ids.clone(), nm_per_million_values)
+            .name("NM / 1M bases")
+            .hover_template("Sample: %{x}<br>NM / 1M bases: %{y:.2f}<extra></extra>")
+            .visible(Visible::False),
+    );
+    metric_trace_views.push(MetricTraceView::NmPerMillion);
+
+    let soft_clip_read_percent_values: Vec<f64> = report
+        .samples
+        .iter()
+        .map(|sample| {
+            if sample.counts.primary_mapped_reads_used == 0 {
+                0.0
+            } else {
+                sample.soft_clips.reads_with_soft_clips as f64 * 100.0
+                    / sample.counts.primary_mapped_reads_used as f64
+            }
+        })
+        .collect();
+    metrics_plot.add_trace(
+        Bar::new(sample_ids.clone(), soft_clip_read_percent_values)
+            .name("Reads with soft clips (%)")
+            .hover_template("Sample: %{x}<br>Reads with soft clips: %{y:.2f}%<extra></extra>")
+            .visible(Visible::False),
+    );
+    metric_trace_views.push(MetricTraceView::SoftClipReadPercent);
+
     let unmapped_values: Vec<u64> = report
         .samples
         .iter()
@@ -383,7 +456,10 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             Scatter::new(x, y)
                 .mode(Mode::Lines)
                 .line(Line::new().width(2.0))
-                .hover_template("Read length: %{x}<br>Reads: %{y:.2f}<extra></extra>")
+                .hover_template(format!(
+                    "Read length: %{{x}} | Sample: {}<br>Reads: %{{y:.2f}}",
+                    escape_html(&sample.sample_id)
+                ))
                 .name(format!("{} read length", sample.sample_id))
                 .visible(Visible::True),
         );
@@ -566,6 +642,45 @@ pub fn write_html_report(report: &QcReport, path: &Path, plot_max_contigs: usize
             true,
             true,
             Some(read_length_x_max),
+        ),
+        (
+            "Soft-clipped bases / 1M".to_string(),
+            MetricSelection::SoftClipsPerMillion,
+            "Soft-clipped bases per 1M mapped bases by sample".to_string(),
+            "Sample".to_string(),
+            "Soft-clipped bases / 1M bases".to_string(),
+            "category".to_string(),
+            json!(sample_ids.clone()),
+            true,
+            true,
+            false,
+            None,
+        ),
+        (
+            "NM / 1M bases".to_string(),
+            MetricSelection::NmPerMillion,
+            "NM per 1M mapped bases by sample".to_string(),
+            "Sample".to_string(),
+            "NM / 1M bases".to_string(),
+            "category".to_string(),
+            json!(sample_ids.clone()),
+            true,
+            true,
+            false,
+            None,
+        ),
+        (
+            "% reads with soft clips".to_string(),
+            MetricSelection::SoftClipReadPercent,
+            "Reads with soft clips (%) by sample".to_string(),
+            "Sample".to_string(),
+            "Reads with soft clips (%)".to_string(),
+            "category".to_string(),
+            json!(sample_ids.clone()),
+            true,
+            true,
+            false,
+            None,
         ),
     ];
     metric_options.extend(tag_metric_options);
@@ -768,6 +883,9 @@ fn metric_trace_is_visible(trace_view: &MetricTraceView, selection: &MetricSelec
     match (trace_view, selection) {
         (MetricTraceView::MappedReads, MetricSelection::MappedReads) => true,
         (MetricTraceView::SoftClips, MetricSelection::SoftClips) => true,
+        (MetricTraceView::SoftClipsPerMillion, MetricSelection::SoftClipsPerMillion) => true,
+        (MetricTraceView::NmPerMillion, MetricSelection::NmPerMillion) => true,
+        (MetricTraceView::SoftClipReadPercent, MetricSelection::SoftClipReadPercent) => true,
         (MetricTraceView::Unmapped, MetricSelection::Unmapped) => true,
         (MetricTraceView::MismatchByBaseQuality, MetricSelection::MismatchByBaseQuality) => true,
         (MetricTraceView::ReadLength, MetricSelection::ReadLength) => true,
@@ -804,9 +922,128 @@ fn compose_two_plot_html(report: &QcReport, depth_plot: &Plot, metrics_plot: &Pl
     <script>
     document.addEventListener("DOMContentLoaded", function () {
         const table = document.querySelector(".metrics-table");
-        if (table) {
-            new Tablesort(table);
+        if (!table) {
+            return;
         }
+        new Tablesort(table);
+
+        const depthPlot = document.getElementById("depth-distribution-plot");
+        if (!depthPlot || typeof Plotly === "undefined") {
+            return;
+        }
+
+        const initializeRowHoverHighlight = function (attempt) {
+            const traces = Array.isArray(depthPlot.data) ? depthPlot.data : [];
+            if (traces.length === 0) {
+                if (attempt < 120) {
+                    window.requestAnimationFrame(function () {
+                        initializeRowHoverHighlight(attempt + 1);
+                    });
+                }
+                return;
+            }
+
+            const sampleByTraceIndex = traces.map(function (trace) {
+                const name = trace && typeof trace.name === "string" ? trace.name : "";
+                const marker = " (";
+                const markerIndex = name.lastIndexOf(marker);
+                if (markerIndex <= 0) {
+                    return name;
+                }
+                return name.slice(0, markerIndex);
+            });
+            const baseWidths = traces.map(function (trace) {
+                if (trace && trace.line && typeof trace.line.width === "number") {
+                    return trace.line.width;
+                }
+                return 2;
+            });
+            const baseOpacities = traces.map(function (trace) {
+                if (trace && typeof trace.opacity === "number") {
+                    return trace.opacity;
+                }
+                return 1;
+            });
+            const isTraceVisible = function (trace) {
+                return !!trace && trace.visible !== false && trace.visible !== "legendonly";
+            };
+            let hoveredSampleId = "";
+            let isInternalRestyle = false;
+
+            const applyHighlight = function (sampleId) {
+                hoveredSampleId = sampleId || "";
+                const currentTraces = Array.isArray(depthPlot.data) ? depthPlot.data : [];
+                const visibleTraceIndices = [];
+                for (let i = 0; i < currentTraces.length; i += 1) {
+                    if (isTraceVisible(currentTraces[i])) {
+                        visibleTraceIndices.push(i);
+                    }
+                }
+                if (visibleTraceIndices.length === 0) {
+                    return;
+                }
+                const hasMatch =
+                    hoveredSampleId &&
+                    visibleTraceIndices.some(function (traceIndex) {
+                        return sampleByTraceIndex[traceIndex] === hoveredSampleId;
+                    });
+                const widths = [];
+                const opacities = [];
+                for (let i = 0; i < visibleTraceIndices.length; i += 1) {
+                    const traceIndex = visibleTraceIndices[i];
+                    if (!hasMatch) {
+                        widths.push(baseWidths[traceIndex]);
+                        opacities.push(baseOpacities[traceIndex]);
+                    } else if (sampleByTraceIndex[traceIndex] === hoveredSampleId) {
+                        widths.push(Math.max(baseWidths[traceIndex], 4));
+                        opacities.push(1);
+                    } else {
+                        widths.push(Math.max(1, baseWidths[traceIndex] - 1));
+                        opacities.push(0.2);
+                    }
+                }
+                isInternalRestyle = true;
+                const result = Plotly.restyle(
+                    depthPlot,
+                    { "line.width": widths, opacity: opacities },
+                    visibleTraceIndices
+                );
+                if (result && typeof result.then === "function") {
+                    result.finally(function () {
+                        isInternalRestyle = false;
+                    });
+                } else {
+                    isInternalRestyle = false;
+                }
+            };
+
+            const rows = table.querySelectorAll("tbody tr[data-sample-id]");
+            rows.forEach(function (row) {
+                row.addEventListener("mouseenter", function () {
+                    applyHighlight(row.dataset.sampleId || "");
+                });
+                row.addEventListener("mouseleave", function () {
+                    applyHighlight("");
+                });
+            });
+
+            const tbody = table.querySelector("tbody");
+            if (tbody) {
+                tbody.addEventListener("mouseleave", function () {
+                    applyHighlight("");
+                });
+            }
+
+            if (typeof depthPlot.on === "function") {
+                depthPlot.on("plotly_restyle", function () {
+                    if (!isInternalRestyle) {
+                        applyHighlight(hoveredSampleId);
+                    }
+                });
+            }
+        };
+
+        initializeRowHoverHighlight(0);
     });
     </script>
     "#;
@@ -1092,7 +1329,7 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
     html.push_str("<th>Mapped reads</th>");
     html.push_str("<th>Unmapped reads</th>");
     html.push_str("<th>Soft-clipped bases / 1M bases</th>");
-    html.push_str("<th>Reads with soft clips</th>");
+    html.push_str("<th>Reads with soft clips (%)</th>");
     html.push_str("<th>NM / 1M bases</th>");
     html.push_str("<th>Read length min</th>");
     html.push_str("<th>Read length p10</th>");
@@ -1116,7 +1353,10 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
         let total_reads = sample.counts.total_records_seen;
         let mapped_read_bases =
             sample.read_length.mean * sample.counts.primary_mapped_reads_used as f64;
-        html.push_str("<tr>");
+        html.push_str(&format!(
+            "<tr data-sample-id=\"{}\">",
+            escape_html(&sample.sample_id)
+        ));
         html.push_str(&format!("<td>{}</td>", escape_html(&sample.sample_id)));
         html.push_str(&format!("<td>{}</td>", median_depth));
         html.push_str(&format!("<td>{}</td>", mode_depth));
@@ -1138,7 +1378,7 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
         ));
         html.push_str(&format!(
             "<td>{}</td>",
-            format_count_with_percent(
+            format_percent(
                 sample.soft_clips.reads_with_soft_clips,
                 sample.counts.primary_mapped_reads_used
             )
@@ -1188,6 +1428,15 @@ fn format_count_with_percent(count: u64, total: u64) -> String {
         (count as f64 * 100.0) / total as f64
     };
     format!("{count} ({percent:.2}%)")
+}
+
+fn format_percent(count: u64, total: u64) -> String {
+    let percent = if total == 0 {
+        0.0
+    } else {
+        (count as f64 * 100.0) / total as f64
+    };
+    format!("{percent:.2}%")
 }
 
 fn format_per_million_bases(count: u64, total_bases: f64) -> String {
@@ -1255,10 +1504,10 @@ fn chromosome_sort_key(name: &str) -> (u8, u16, String) {
 fn read_length_points(hist: &std::collections::BTreeMap<u32, u64>) -> (Vec<u32>, Vec<f64>) {
     let mut x = Vec::with_capacity(hist.len());
     let mut y = Vec::with_capacity(hist.len());
-    let has_wide_bins = hist.keys().any(|read_len| *read_len > 1_000);
+    let has_wide_bins = hist.keys().any(|read_len| *read_len > 500);
     for (read_len, count) in hist {
         x.push(*read_len);
-        if *read_len > 1_000 || (has_wide_bins && *read_len == 1_000) {
+        if *read_len > 500 || (has_wide_bins && *read_len == 500) {
             y.push(*count as f64 / 50.0);
         } else {
             y.push(*count as f64);
@@ -1469,8 +1718,8 @@ mod tests {
         MetricSelection, MetricTraceView, canonicalize_json_chromosome,
         depth_median_from_histogram, depth_mode_from_histogram, depth_points,
         depth_x_max_from_histogram, format_count_with_percent, format_per_million_bases,
-        metric_trace_is_visible, read_length_points, read_length_x_max_from_histograms,
-        sort_depth_chromosomes,
+        format_percent, metric_trace_is_visible, read_length_points,
+        read_length_x_max_from_histograms, sort_depth_chromosomes,
     };
 
     #[test]
@@ -1479,9 +1728,25 @@ mod tests {
             &MetricTraceView::MappedReads,
             &MetricSelection::MappedReads
         ));
+        assert!(metric_trace_is_visible(
+            &MetricTraceView::SoftClipsPerMillion,
+            &MetricSelection::SoftClipsPerMillion
+        ));
+        assert!(metric_trace_is_visible(
+            &MetricTraceView::NmPerMillion,
+            &MetricSelection::NmPerMillion
+        ));
+        assert!(metric_trace_is_visible(
+            &MetricTraceView::SoftClipReadPercent,
+            &MetricSelection::SoftClipReadPercent
+        ));
         assert!(!metric_trace_is_visible(
             &MetricTraceView::MappedReads,
             &MetricSelection::Unmapped
+        ));
+        assert!(!metric_trace_is_visible(
+            &MetricTraceView::SoftClipsPerMillion,
+            &MetricSelection::SoftClips
         ));
         assert!(metric_trace_is_visible(
             &MetricTraceView::ReadLength,
@@ -1531,21 +1796,21 @@ mod tests {
     #[test]
     fn read_length_points_normalize_wide_bins() {
         let mut hist = BTreeMap::new();
-        hist.insert(999, 20);
-        hist.insert(1000, 10);
-        hist.insert(1050, 100);
+        hist.insert(499, 20);
+        hist.insert(500, 10);
+        hist.insert(550, 100);
         let (x, y) = read_length_points(&hist);
-        assert_eq!(x, vec![999, 1000, 1050]);
+        assert_eq!(x, vec![499, 500, 550]);
         assert_eq!(y, vec![20.0, 0.2, 2.0]);
     }
 
     #[test]
-    fn read_length_points_keep_1000_unscaled_when_no_wide_bins() {
+    fn read_length_points_keep_500_unscaled_when_no_wide_bins() {
         let mut hist = BTreeMap::new();
-        hist.insert(950, 7);
-        hist.insert(1000, 10);
+        hist.insert(450, 7);
+        hist.insert(500, 10);
         let (x, y) = read_length_points(&hist);
-        assert_eq!(x, vec![950, 1000]);
+        assert_eq!(x, vec![450, 500]);
         assert_eq!(y, vec![7.0, 10.0]);
     }
 
@@ -1565,6 +1830,12 @@ mod tests {
     fn format_count_with_percent_uses_total_reads() {
         assert_eq!(format_count_with_percent(9923, 10_000), "9923 (99.23%)");
         assert_eq!(format_count_with_percent(0, 0), "0 (0.00%)");
+    }
+
+    #[test]
+    fn format_percent_uses_total_reads() {
+        assert_eq!(format_percent(9923, 10_000), "99.23%");
+        assert_eq!(format_percent(0, 0), "0.00%");
     }
 
     #[test]

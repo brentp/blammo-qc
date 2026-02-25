@@ -110,11 +110,11 @@ impl ReadLengthAccumulator {
 }
 
 fn read_length_histogram_bin(read_len: u32) -> u32 {
-    if read_len <= 1_000 {
+    if read_len <= 500 {
         return read_len;
     }
-    let over = read_len - 1_000;
-    1_000 + ((over / 50) * 50)
+    let over = read_len - 500;
+    500 + ((over / 50) * 50)
 }
 
 #[derive(Debug)]
@@ -1047,13 +1047,13 @@ mod tests {
     }
 
     #[test]
-    fn read_length_histogram_uses_wider_bins_above_1000() {
-        assert_eq!(read_length_histogram_bin(1000), 1000);
-        assert_eq!(read_length_histogram_bin(1010), 1000);
-        assert_eq!(read_length_histogram_bin(1045), 1000);
-        assert_eq!(read_length_histogram_bin(1050), 1050);
-        assert_eq!(read_length_histogram_bin(1099), 1050);
-        assert_eq!(read_length_histogram_bin(1100), 1100);
+    fn read_length_histogram_uses_wider_bins_above_500() {
+        assert_eq!(read_length_histogram_bin(500), 500);
+        assert_eq!(read_length_histogram_bin(510), 500);
+        assert_eq!(read_length_histogram_bin(545), 500);
+        assert_eq!(read_length_histogram_bin(550), 550);
+        assert_eq!(read_length_histogram_bin(599), 550);
+        assert_eq!(read_length_histogram_bin(600), 600);
     }
 
     #[test]
