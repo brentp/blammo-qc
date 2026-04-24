@@ -18,9 +18,14 @@ use plotly::{
         update_menu::{Button, ButtonMethod, UpdateMenu, UpdateMenuType},
     },
 };
+use serde::Serialize;
 use serde_json::json;
 
-use crate::model::{BQ_BIN_LABELS, DEPTH_HIST_BINS, QcReport, SampleQc};
+use crate::model::{BQ_BIN_LABELS, DEPTH_HIST_BINS, QcReport, RunSettings, SampleQc};
+
+// Stable downstream JSON depth-view keys; `kind` is the authoritative discriminator.
+const DATA_DEPTH_GENOME_KEY: &str = "genome_wide";
+const DATA_DEPTH_OTHER_KEY: &str = "other_contigs";
 
 pub fn write_json_report(report: &QcReport, path: &Path) -> Result<()> {
     let filtered = filter_json_chromosomes(report);
@@ -30,6 +35,324 @@ pub fn write_json_report(report: &QcReport, path: &Path) -> Result<()> {
     serde_json::to_writer_pretty(writer, &filtered)
         .with_context(|| format!("failed to write JSON output {}", path.display()))?;
     Ok(())
+}
+
+pub fn write_data_json_report(
+    report: &QcReport,
+    path: &Path,
+    plot_max_contigs: usize,
+) -> Result<()> {
+    let data_report = build_data_json_report(report, plot_max_contigs);
+    let file = File::create(path)
+        .with_context(|| format!("failed to create data JSON output {}", path.display()))?;
+    let writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(writer, &data_report)
+        .with_context(|| format!("failed to write data JSON output {}", path.display()))?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct DataJsonReport {
+    tool_version: String,
+    run_timestamp: chrono::DateTime<chrono::Utc>,
+    settings: RunSettings,
+    data: DownstreamData,
+}
+
+#[derive(Debug, Serialize)]
+struct DownstreamData {
+    sample_count: usize,
+    samples: Vec<DataSample>,
+    depth_views: Vec<DataDepthView>,
+    sample_depths: Vec<SampleDepthData>,
+    metrics_table: Vec<DataMetricsRow>,
+    tag_metrics: Vec<DataTagMetric>,
+}
+
+#[derive(Debug, Serialize)]
+struct DataSample {
+    sample_id: String,
+    input_path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DataDepthView {
+    key: String,
+    label: String,
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    omitted_contig_count: Option<usize>,
+    x_max: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct SampleDepthData {
+    sample_id: String,
+    histograms: BTreeMap<String, Vec<u64>>,
+}
+
+#[derive(Debug, Serialize)]
+struct DataMetricsRow {
+    sample_id: String,
+    median_depth: u32,
+    mode_depth: u32,
+    total_records_seen: u64,
+    primary_mapped_reads_used: u64,
+    primary_mapped_reads_percent: f64,
+    unmapped_reads: u64,
+    unmapped_reads_percent: f64,
+    total_soft_clipped_bases: u64,
+    soft_clipped_bases_per_million_bases: f64,
+    reads_with_soft_clips: u64,
+    reads_with_soft_clips_percent: f64,
+    nm_sum: u64,
+    nm_per_million_bases: f64,
+    read_length_min: u32,
+    read_length_p10: u32,
+    read_length_median: f64,
+    read_length_mean: f64,
+    read_length_p90: u32,
+    read_length_max: u32,
+    warnings_count: usize,
+    bq_mismatch_bins: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct DataTagMetric {
+    tag: String,
+    view: String,
+    values: Vec<i64>,
+    sample_counts: Vec<DataTagSampleCounts>,
+}
+
+#[derive(Debug, Serialize)]
+struct DataTagSampleCounts {
+    sample_id: String,
+    counts: BTreeMap<i64, u64>,
+}
+
+fn build_data_json_report(report: &QcReport, plot_max_contigs: usize) -> DataJsonReport {
+    let (depth_views, sample_depths) = build_data_depths(report, plot_max_contigs);
+    DataJsonReport {
+        tool_version: report.tool_version.clone(),
+        run_timestamp: report.run_timestamp,
+        settings: report.settings.clone(),
+        data: DownstreamData {
+            sample_count: report.samples.len(),
+            samples: report
+                .samples
+                .iter()
+                .map(|sample| DataSample {
+                    sample_id: sample.sample_id.clone(),
+                    input_path: sample.input_path.clone(),
+                })
+                .collect(),
+            depth_views,
+            sample_depths,
+            metrics_table: build_data_metrics_table(report),
+            tag_metrics: build_data_tag_metrics(report),
+        },
+    }
+}
+
+fn build_data_depths(
+    report: &QcReport,
+    plot_max_contigs: usize,
+) -> (Vec<DataDepthView>, Vec<SampleDepthData>) {
+    let (mut selected_contigs, omitted_contig_count) =
+        select_depth_contigs(report, plot_max_contigs);
+    sort_depth_chromosomes(&mut selected_contigs);
+    let selected_contig_set: BTreeSet<String> = selected_contigs.iter().cloned().collect();
+
+    let mut view_keys = vec![DATA_DEPTH_GENOME_KEY.to_string()];
+    view_keys.extend(selected_contigs.iter().cloned());
+    if omitted_contig_count > 0 {
+        view_keys.push(DATA_DEPTH_OTHER_KEY.to_string());
+    }
+
+    let mut combined_by_view: BTreeMap<String, Vec<u64>> = view_keys
+        .iter()
+        .map(|key| (key.clone(), vec![0_u64; DEPTH_HIST_BINS]))
+        .collect();
+    let mut sample_depths = Vec::with_capacity(report.samples.len());
+
+    for sample in &report.samples {
+        let mut histograms = BTreeMap::new();
+        for key in &view_keys {
+            let histogram = if key == DATA_DEPTH_GENOME_KEY {
+                sample.depth_distribution.genome_wide_histogram.clone()
+            } else if key == DATA_DEPTH_OTHER_KEY {
+                combine_other_contig_histogram(sample, &selected_contig_set)
+            } else {
+                sample
+                    .depth_distribution
+                    .per_chromosome_histograms
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| vec![0_u64; DEPTH_HIST_BINS])
+            };
+            if let Some(combined) = combined_by_view.get_mut(key) {
+                for (i, value) in histogram.iter().enumerate().take(DEPTH_HIST_BINS) {
+                    combined[i] += value;
+                }
+            }
+            histograms.insert(key.clone(), trim_histogram_to_highest_bin(&histogram));
+        }
+        sample_depths.push(SampleDepthData {
+            sample_id: sample.sample_id.clone(),
+            histograms,
+        });
+    }
+
+    let mut depth_views = Vec::with_capacity(view_keys.len());
+    depth_views.push(DataDepthView {
+        key: DATA_DEPTH_GENOME_KEY.to_string(),
+        label: "Genome-wide".to_string(),
+        kind: "genome".to_string(),
+        omitted_contig_count: None,
+        x_max: combined_by_view
+            .get(DATA_DEPTH_GENOME_KEY)
+            .map(|hist| depth_x_max_from_histogram(hist))
+            .unwrap_or(1),
+    });
+    for contig in selected_contigs {
+        depth_views.push(DataDepthView {
+            key: contig.clone(),
+            label: contig.clone(),
+            kind: "contig".to_string(),
+            omitted_contig_count: None,
+            x_max: combined_by_view
+                .get(&contig)
+                .map(|hist| depth_x_max_from_histogram(hist))
+                .unwrap_or(1),
+        });
+    }
+    if omitted_contig_count > 0 {
+        depth_views.push(DataDepthView {
+            key: DATA_DEPTH_OTHER_KEY.to_string(),
+            label: format!("Other ({omitted_contig_count} contigs)"),
+            kind: "other".to_string(),
+            omitted_contig_count: Some(omitted_contig_count),
+            x_max: combined_by_view
+                .get(DATA_DEPTH_OTHER_KEY)
+                .map(|hist| depth_x_max_from_histogram(hist))
+                .unwrap_or(1),
+        });
+    }
+
+    (depth_views, sample_depths)
+}
+
+fn trim_histogram_to_highest_bin(histogram: &[u64]) -> Vec<u64> {
+    let upper = usize::min(histogram.len(), DEPTH_HIST_BINS);
+    let len = histogram
+        .iter()
+        .take(upper)
+        .rposition(|count| *count > 0)
+        .map(|index| index + 1)
+        .unwrap_or(1);
+    histogram.iter().take(len).copied().collect()
+}
+
+fn build_data_metrics_table(report: &QcReport) -> Vec<DataMetricsRow> {
+    report
+        .samples
+        .iter()
+        .map(|sample| {
+            let total_reads = sample.counts.total_records_seen;
+            let mapped_reads = sample.counts.primary_mapped_reads_used;
+            let mapped_read_bases = sample.read_length.mean * mapped_reads as f64;
+            DataMetricsRow {
+                sample_id: sample.sample_id.clone(),
+                median_depth: depth_median_from_histogram(
+                    &sample.depth_distribution.genome_wide_histogram,
+                ),
+                mode_depth: depth_mode_from_histogram(
+                    &sample.depth_distribution.genome_wide_histogram,
+                ),
+                total_records_seen: total_reads,
+                primary_mapped_reads_used: mapped_reads,
+                primary_mapped_reads_percent: percent_value(mapped_reads, total_reads),
+                unmapped_reads: sample.counts.unmapped_reads,
+                unmapped_reads_percent: percent_value(sample.counts.unmapped_reads, total_reads),
+                total_soft_clipped_bases: sample.soft_clips.total_soft_clipped_bases,
+                soft_clipped_bases_per_million_bases: per_million_bases_value(
+                    sample.soft_clips.total_soft_clipped_bases,
+                    mapped_read_bases,
+                ),
+                reads_with_soft_clips: sample.soft_clips.reads_with_soft_clips,
+                reads_with_soft_clips_percent: percent_value(
+                    sample.soft_clips.reads_with_soft_clips,
+                    mapped_reads,
+                ),
+                nm_sum: sample.mismatches.nm_sum,
+                nm_per_million_bases: per_million_bases_value(
+                    sample.mismatches.nm_sum,
+                    mapped_read_bases,
+                ),
+                read_length_min: sample.read_length.min,
+                read_length_p10: sample.read_length.p10,
+                read_length_median: sample.read_length.median,
+                read_length_mean: sample.read_length.mean,
+                read_length_p90: sample.read_length.p90,
+                read_length_max: sample.read_length.max,
+                warnings_count: sample.warnings.len(),
+                bq_mismatch_bins: BQ_BIN_LABELS
+                    .iter()
+                    .map(|label| ((*label).to_string(), sample_count(sample, label)))
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+fn build_data_tag_metrics(report: &QcReport) -> Vec<DataTagMetric> {
+    let mut tag_metrics = Vec::new();
+    for tag in &report.settings.tag_bars {
+        tag_metrics.push(build_data_tag_metric(report, tag, "bar"));
+    }
+    for tag in &report.settings.tag_lines {
+        tag_metrics.push(build_data_tag_metric(report, tag, "line"));
+    }
+    tag_metrics
+}
+
+fn build_data_tag_metric(report: &QcReport, tag: &str, view: &str) -> DataTagMetric {
+    let mut tag_values = BTreeSet::new();
+    for sample in &report.samples {
+        if let Some(counts) = sample.tag_value_counts.get(tag) {
+            tag_values.extend(counts.keys().copied());
+        }
+    }
+    let values: Vec<i64> = tag_values.into_iter().collect();
+    let sample_counts = report
+        .samples
+        .iter()
+        .map(|sample| {
+            let counts = values
+                .iter()
+                .filter_map(|value| {
+                    let count = sample
+                        .tag_value_counts
+                        .get(tag)
+                        .and_then(|counts| counts.get(value).copied())
+                        .unwrap_or(0);
+                    (count > 0).then_some((*value, count))
+                })
+                .collect();
+            DataTagSampleCounts {
+                sample_id: sample.sample_id.clone(),
+                counts,
+            }
+        })
+        .collect();
+
+    DataTagMetric {
+        tag: tag.to_string(),
+        view: view.to_string(),
+        values,
+        sample_counts,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1345,60 +1668,65 @@ fn build_non_depth_metrics_table(report: &QcReport) -> String {
     html.push_str("<th>BQ 40+ mismatches</th>");
     html.push_str("</tr></thead><tbody>");
 
-    for sample in &report.samples {
-        let median_depth =
-            depth_median_from_histogram(&sample.depth_distribution.genome_wide_histogram);
-        let mode_depth =
-            depth_mode_from_histogram(&sample.depth_distribution.genome_wide_histogram);
-        let total_reads = sample.counts.total_records_seen;
-        let mapped_read_bases =
-            sample.read_length.mean * sample.counts.primary_mapped_reads_used as f64;
+    for row in build_data_metrics_table(report) {
         html.push_str(&format!(
             "<tr data-sample-id=\"{}\">",
-            escape_html(&sample.sample_id)
+            escape_html(&row.sample_id)
         ));
-        html.push_str(&format!("<td>{}</td>", escape_html(&sample.sample_id)));
-        html.push_str(&format!("<td>{}</td>", median_depth));
-        html.push_str(&format!("<td>{}</td>", mode_depth));
-        html.push_str(&format!("<td>{}</td>", total_reads));
+        html.push_str(&format!("<td>{}</td>", escape_html(&row.sample_id)));
+        html.push_str(&format!("<td>{}</td>", row.median_depth));
+        html.push_str(&format!("<td>{}</td>", row.mode_depth));
+        html.push_str(&format!("<td>{}</td>", row.total_records_seen));
         html.push_str(&format!(
             "<td>{}</td>",
-            format_count_with_percent(sample.counts.primary_mapped_reads_used, total_reads)
-        ));
-        html.push_str(&format!(
-            "<td>{}</td>",
-            format_count_with_percent(sample.counts.unmapped_reads, total_reads)
-        ));
-        html.push_str(&format!(
-            "<td>{}</td>",
-            format_per_million_bases(
-                sample.soft_clips.total_soft_clipped_bases,
-                mapped_read_bases
+            format_count_with_percent_value(
+                row.primary_mapped_reads_used,
+                row.primary_mapped_reads_percent
             )
         ));
         html.push_str(&format!(
             "<td>{}</td>",
-            format_percent(
-                sample.soft_clips.reads_with_soft_clips,
-                sample.counts.primary_mapped_reads_used
-            )
+            format_count_with_percent_value(row.unmapped_reads, row.unmapped_reads_percent)
         ));
         html.push_str(&format!(
             "<td>{}</td>",
-            format_per_million_bases(sample.mismatches.nm_sum, mapped_read_bases)
+            format_numeric_value(row.soft_clipped_bases_per_million_bases)
         ));
-        html.push_str(&format!("<td>{}</td>", sample.read_length.min));
-        html.push_str(&format!("<td>{}</td>", sample.read_length.p10));
-        html.push_str(&format!("<td>{:.0}</td>", sample.read_length.median));
-        html.push_str(&format!("<td>{:.0}</td>", sample.read_length.mean));
-        html.push_str(&format!("<td>{}</td>", sample.read_length.p90));
-        html.push_str(&format!("<td>{}</td>", sample.read_length.max));
-        html.push_str(&format!("<td>{}</td>", sample.warnings.len()));
-        html.push_str(&format!("<td>{}</td>", sample_count(sample, "0-9")));
-        html.push_str(&format!("<td>{}</td>", sample_count(sample, "10-19")));
-        html.push_str(&format!("<td>{}</td>", sample_count(sample, "20-29")));
-        html.push_str(&format!("<td>{}</td>", sample_count(sample, "30-39")));
-        html.push_str(&format!("<td>{}</td>", sample_count(sample, "40+")));
+        html.push_str(&format!(
+            "<td>{}</td>",
+            format_percent_value(row.reads_with_soft_clips_percent)
+        ));
+        html.push_str(&format!(
+            "<td>{}</td>",
+            format_numeric_value(row.nm_per_million_bases)
+        ));
+        html.push_str(&format!("<td>{}</td>", row.read_length_min));
+        html.push_str(&format!("<td>{}</td>", row.read_length_p10));
+        html.push_str(&format!("<td>{:.0}</td>", row.read_length_median));
+        html.push_str(&format!("<td>{:.0}</td>", row.read_length_mean));
+        html.push_str(&format!("<td>{}</td>", row.read_length_p90));
+        html.push_str(&format!("<td>{}</td>", row.read_length_max));
+        html.push_str(&format!("<td>{}</td>", row.warnings_count));
+        html.push_str(&format!(
+            "<td>{}</td>",
+            row.bq_mismatch_bins.get("0-9").copied().unwrap_or(0)
+        ));
+        html.push_str(&format!(
+            "<td>{}</td>",
+            row.bq_mismatch_bins.get("10-19").copied().unwrap_or(0)
+        ));
+        html.push_str(&format!(
+            "<td>{}</td>",
+            row.bq_mismatch_bins.get("20-29").copied().unwrap_or(0)
+        ));
+        html.push_str(&format!(
+            "<td>{}</td>",
+            row.bq_mismatch_bins.get("30-39").copied().unwrap_or(0)
+        ));
+        html.push_str(&format!(
+            "<td>{}</td>",
+            row.bq_mismatch_bins.get("40+").copied().unwrap_or(0)
+        ));
         html.push_str("</tr>");
     }
 
@@ -1421,30 +1749,31 @@ fn escape_html(value: &str) -> String {
     escaped
 }
 
-fn format_count_with_percent(count: u64, total: u64) -> String {
-    let percent = if total == 0 {
-        0.0
-    } else {
-        (count as f64 * 100.0) / total as f64
-    };
+fn format_count_with_percent_value(count: u64, percent: f64) -> String {
     format!("{count} ({percent:.2}%)")
 }
 
-fn format_percent(count: u64, total: u64) -> String {
-    let percent = if total == 0 {
-        0.0
-    } else {
-        (count as f64 * 100.0) / total as f64
-    };
+fn format_percent_value(percent: f64) -> String {
     format!("{percent:.2}%")
 }
 
-fn format_per_million_bases(count: u64, total_bases: f64) -> String {
-    if total_bases <= 0.0 {
-        return "0.00".to_string();
+fn format_numeric_value(value: f64) -> String {
+    format!("{value:.2}")
+}
+
+fn percent_value(count: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (count as f64 * 100.0) / total as f64
     }
-    let per_million = (count as f64 * 1_000_000.0) / total_bases;
-    format!("{per_million:.2}")
+}
+
+fn per_million_bases_value(count: u64, total_bases: f64) -> f64 {
+    if total_bases <= 0.0 {
+        return 0.0;
+    }
+    (count as f64 * 1_000_000.0) / total_bases
 }
 
 fn depth_median_from_histogram(hist: &[u64]) -> u32 {
@@ -1717,9 +2046,9 @@ mod tests {
     use super::{
         MetricSelection, MetricTraceView, canonicalize_json_chromosome,
         depth_median_from_histogram, depth_mode_from_histogram, depth_points,
-        depth_x_max_from_histogram, format_count_with_percent, format_per_million_bases,
-        format_percent, metric_trace_is_visible, read_length_points,
-        read_length_x_max_from_histograms, sort_depth_chromosomes,
+        depth_x_max_from_histogram, format_count_with_percent_value, format_numeric_value,
+        format_percent_value, metric_trace_is_visible, per_million_bases_value, percent_value,
+        read_length_points, read_length_x_max_from_histograms, sort_depth_chromosomes,
     };
 
     #[test]
@@ -1827,22 +2156,30 @@ mod tests {
     }
 
     #[test]
-    fn format_count_with_percent_uses_total_reads() {
-        assert_eq!(format_count_with_percent(9923, 10_000), "9923 (99.23%)");
-        assert_eq!(format_count_with_percent(0, 0), "0 (0.00%)");
+    fn count_with_percent_formatter_uses_precomputed_percent() {
+        assert_eq!(
+            format_count_with_percent_value(9923, 99.23),
+            "9923 (99.23%)"
+        );
+        assert_eq!(format_count_with_percent_value(0, 0.0), "0 (0.00%)");
     }
 
     #[test]
-    fn format_percent_uses_total_reads() {
-        assert_eq!(format_percent(9923, 10_000), "99.23%");
-        assert_eq!(format_percent(0, 0), "0.00%");
+    fn percent_value_uses_total_reads() {
+        assert_eq!(percent_value(9923, 10_000), 99.23);
+        assert_eq!(percent_value(0, 0), 0.0);
+        assert_eq!(format_percent_value(percent_value(9923, 10_000)), "99.23%");
     }
 
     #[test]
-    fn format_per_million_bases_uses_total_bases() {
-        assert_eq!(format_per_million_bases(125, 1_000_000.0), "125.00");
-        assert_eq!(format_per_million_bases(1, 10.0), "100000.00");
-        assert_eq!(format_per_million_bases(5, 0.0), "0.00");
+    fn per_million_bases_value_uses_total_bases() {
+        assert_eq!(per_million_bases_value(125, 1_000_000.0), 125.0);
+        assert_eq!(per_million_bases_value(1, 10.0), 100000.0);
+        assert_eq!(per_million_bases_value(5, 0.0), 0.0);
+        assert_eq!(
+            format_numeric_value(per_million_bases_value(125, 1_000_000.0)),
+            "125.00"
+        );
     }
 
     #[test]

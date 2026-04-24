@@ -22,6 +22,10 @@ pub struct Cli {
     #[arg(long)]
     pub output_json: Option<PathBuf>,
 
+    /// Output downstream data JSON path (optional; omitted unless specified).
+    #[arg(long)]
+    pub output_data_json: Option<PathBuf>,
+
     /// Output HTML report path. Defaults to blammo.html.
     #[arg(long)]
     pub output_html: Option<PathBuf>,
@@ -83,6 +87,7 @@ pub struct SampleInput {
 pub struct Config {
     pub inputs: Vec<SampleInput>,
     pub output_json: Option<PathBuf>,
+    pub output_data_json: Option<PathBuf>,
     pub output_html: PathBuf,
     pub reference: Option<PathBuf>,
     pub min_base_quality: u8,
@@ -126,6 +131,18 @@ impl Cli {
                 }
             }
         }
+        if let Some(output_data_json) = &self.output_data_json {
+            if let Some(parent) = output_data_json.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!(
+                            "failed to create output data JSON directory {}",
+                            parent.display()
+                        )
+                    })?;
+                }
+            }
+        }
         if let Some(parent) = output_html.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).with_context(|| {
@@ -146,6 +163,7 @@ impl Cli {
         Ok(Config {
             inputs,
             output_json: self.output_json,
+            output_data_json: self.output_data_json,
             output_html,
             reference: self.reference,
             min_base_quality: self.min_base_quality,

@@ -14,7 +14,7 @@ use crate::{
     cli::Cli,
     metrics::{ProcessingOptions, process_sample},
     model::{QcReport, RunSettings},
-    report::{write_html_report, write_json_report},
+    report::{write_data_json_report, write_html_report, write_json_report},
 };
 
 fn main() {
@@ -84,6 +84,9 @@ fn run() -> Result<()> {
 
     if let Some(output_json) = &config.output_json {
         write_json_report(&report, output_json)?;
+    }
+    if let Some(output_data_json) = &config.output_data_json {
+        write_data_json_report(&report, output_data_json, config.plot_max_contigs)?;
     }
     write_html_report(&report, &config.output_html, config.plot_max_contigs)?;
     Ok(())
